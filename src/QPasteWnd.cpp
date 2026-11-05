@@ -6029,23 +6029,25 @@ bool CQPasteWnd::DoDittoXPublishClip()
 		return true;
 	}
 
-	// Chỉ publish đúng một clip được chọn; khác → không request, không đổi clipboard.
+	// Action chỉ tới đây khi list đang focus. Consume Ctrl+Z cả lúc selection sai
+	// để WM_CHAR 0x1A không rơi vào nhánh list-to-search và làm bẩn query.
+	// No/multi-selection: không request, không feedback success, không đổi clipboard.
 	if (m_lstHeader.GetSelectedCount() != 1)
 	{
-		return false;
+		return true;
 	}
 
 	CClipIDs ids;
 	m_lstHeader.GetSelectionItemData(ids);
 	if (ids.GetSize() != 1)
 	{
-		return false;
+		return true;
 	}
 
 	CClip clip;
 	if (!clip.LoadFormats(ids[0]))
 	{
-		return false;
+		return true;
 	}
 
 	// Ảnh thắng text như Ctrl+X; không có payload lưu được thì thoát không feedback success.

@@ -541,6 +541,125 @@ namespace
 		return out;
 	}
 
+	void SkipJsonWhitespace(const CStringA& json, int& pos)
+	{
+		while (pos < json.GetLength() &&
+			(json[pos] == ' ' || json[pos] == '\t' || json[pos] == '\r' || json[pos] == '\n'))
+		{
+			pos++;
+		}
+	}
+
+	bool ParseStrictJsonString(const CStringA& json, int& pos, CStringA& value)
+	{
+		value.Empty();
+		if (pos >= json.GetLength() || json[pos] != '"') return false;
+		pos++;
+		while (pos < json.GetLength())
+		{
+			unsigned char ch = static_cast<unsigned char>(json[pos++]);
+			if (ch == '"') return true;
+			if (ch < 0x20) return false; // unescaped JSON control byte
+			if (ch != '\\')
+			{
+				value += static_cast<char>(ch);
+				continue;
+			}
+			if (pos >= json.GetLength()) return false;
+			char escaped = json[pos++];
+			switch (escaped)
+			{
+			case '"': value += '"'; break;
+			case '\\': value += '\\'; break;
+			case '/': value += '/'; break;
+			case 'b': value += '\b'; break;
+			case 'f': value += '\f'; break;
+			case 'n': value += '\n'; break;
+			case 'r': value += '\r'; break;
+			case 't': value += '\t'; break;
+			default:
+				// Finalize fields are ASCII (base64url token, ISO timestamp, error code).
+				// Reject Unicode/unknown escapes rather than partially decoding a bearer URL.
+				return false;
+			}
+		}
+		return false; // unterminated string
+	}
+
+	struct FinalizeJsonFields
+	{
+		CStringA viewerUrl;
+		CStringA expiresAt;
+		CStringA error;
+		bool hasViewerUrl = false;
+		bool hasExpiresAt = false;
+		bool hasError = false;
+	};
+
+	bool ParseFinalizeJsonObject(const CStringA& json, FinalizeJsonFields& fields)
+	{
+		fields = FinalizeJsonFields();
+		int pos = 0;
+		SkipJsonWhitespace(json, pos);
+		if (pos >= json.GetLength() || json[pos++] != '{') return false;
+		SkipJsonWhitespace(json, pos);
+		std::vector<CStringA> seenKeys;
+		if (pos < json.GetLength() && json[pos] == '}')
+		{
+			pos++;
+			SkipJsonWhitespace(json, pos);
+			return pos == json.GetLength();
+		}
+
+		while (pos < json.GetLength())
+		{
+			CStringA key;
+			if (!ParseStrictJsonString(json, pos, key)) return false;
+			for (const CStringA& seen : seenKeys)
+			{
+				if (seen.Compare(key) == 0) return false; // duplicate key makes response ambiguous
+			}
+			seenKeys.push_back(key);
+			SkipJsonWhitespace(json, pos);
+			if (pos >= json.GetLength() || json[pos++] != ':') return false;
+			SkipJsonWhitespace(json, pos);
+			CStringA value;
+			if (!ParseStrictJsonString(json, pos, value)) return false; // route schema is string fields only
+
+			if (key.Compare("viewerUrl") == 0)
+			{
+				fields.viewerUrl = value;
+				fields.hasViewerUrl = true;
+			}
+			else if (key.Compare("expiresAt") == 0)
+			{
+				fields.expiresAt = value;
+				fields.hasExpiresAt = true;
+			}
+			else if (key.Compare("error") == 0)
+			{
+				fields.error = value;
+				fields.hasError = true;
+			}
+
+			SkipJsonWhitespace(json, pos);
+			if (pos < json.GetLength() && json[pos] == ',')
+			{
+				pos++;
+				SkipJsonWhitespace(json, pos);
+				continue;
+			}
+			if (pos < json.GetLength() && json[pos] == '}')
+			{
+				pos++;
+				SkipJsonWhitespace(json, pos);
+				return pos == json.GetLength(); // no trailing garbage
+			}
+			return false;
+		}
+		return false;
+	}
+
 	struct FinalizeResponse
 	{
 		bool networkOk = false;
@@ -557,19 +676,18 @@ namespace
 		out.networkOk = http.networkOk;
 		out.statusCode = http.statusCode;
 		if (!http.networkOk) return out;
+
+		FinalizeJsonFields fields;
+		if (!ParseFinalizeJsonObject(http.body, fields)) return out;
 		if (http.statusCode < 200 || http.statusCode >= 300)
 		{
 			// Never accept a viewerUrl carried by a non-2xx body as a successful finalize.
-			int errorPos = JsonValuePos(http.body, "error");
-			if (errorPos >= 0) out.error = JsonStringAt(http.body, errorPos);
+			if (fields.hasError) out.error = fields.error;
 			return out;
 		}
-
-		int viewerPos = JsonValuePos(http.body, "viewerUrl");
-		int expiresPos = JsonValuePos(http.body, "expiresAt");
-		if (viewerPos < 0 || expiresPos < 0) return out;
-		out.viewerUrl = Utf8ToWide(JsonStringAt(http.body, viewerPos));
-		out.expiresAt = Utf8ToWide(JsonStringAt(http.body, expiresPos));
+		if (!fields.hasViewerUrl || !fields.hasExpiresAt) return out;
+		out.viewerUrl = Utf8ToWide(fields.viewerUrl);
+		out.expiresAt = Utf8ToWide(fields.expiresAt);
 		// A 2xx with missing/malformed fields remains an ambiguous commit; caller retains pending.
 		out.ok = !out.viewerUrl.IsEmpty() && !out.expiresAt.IsEmpty();
 		return out;
