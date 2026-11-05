@@ -13,6 +13,8 @@
 #include "CopyProperties.h"
 #include "CP_Main.h"
 #include "DimWnd.h"
+#include "DittoXShareClient.h"
+#include <memory>
 #include "FormatSQL.h"
 #include "FriendPromptDlg.h"
 #include "GroupName.h"
@@ -91,6 +93,7 @@ CQPasteWnd::CQPasteWnd()
 	m_lastDbWrite = 0;
 	m_pendingRefresh = false;
 	m_lastNonActiveMouseMove = 0;
+	m_dittoxPublishing = false;
 }
 
 CQPasteWnd::~CQPasteWnd()
@@ -197,6 +200,7 @@ BEGIN_MESSAGE_MAP(CQPasteWnd, CWndEx)
 	ON_NOTIFY(NM_GETTOOLTIPTEXT, ID_LIST_HEADER, OnGetToolTipText)
 	ON_MESSAGE(NM_SELECT_DB_ID, OnListSelect_DB_ID)
 	ON_MESSAGE(WM_REFRESH_VIEW, OnRefreshView)
+	ON_MESSAGE(WM_DITTOX_PUBLISH_DONE, OnDittoXPublishDone)
 	ON_MESSAGE(WM_RELOAD_CLIP_IN_UI, OnReloadClipInUI)
 	ON_WM_NCLBUTTONDBLCLK()
 	ON_WM_WINDOWPOSCHANGING()
@@ -3481,6 +3485,9 @@ bool CQPasteWnd::DoAction(CAccel a)
 	case ActionEnums::EXPORT_TO_TEMP_AND_COPY_PATH:
 		ret = DoExportToTempAndCopyPath();
 		break;
+	case ActionEnums::DITTOX_PUBLISH_CLIP:
+		ret = DoDittoXPublishClip();
+		break;
 	case ActionEnums::SAVE_CURRENT_CLIPBOARD:
 		ret = DoSaveCurrentClipboard();
 		break;
@@ -5974,6 +5981,134 @@ void CQPasteWnd::ShowQuickExportFeedback(const CString& copiedPath)
 	KillTimer(TIMER_QUICK_EXPORT_STATUS);
 	m_search.ShowTransientStatus(copiedPath);
 	SetTimer(TIMER_QUICK_EXPORT_STATUS, 1800, NULL);
+}
+
+// --- Ditto-X Ctrl+Z publish (SPEC-2026-11-05) ---
+
+// Context cho worker thread: payload copy sang thread; UI thread không đụng DB trong lúc đó.
+struct DittoXPublishJob
+{
+	HWND ownerWnd;
+	DittoXClipPayload payload;
+};
+
+static UINT DittoXPublishThreadProc(LPVOID param)
+{
+	std::unique_ptr<DittoXPublishJob> job(static_cast<DittoXPublishJob*>(param));
+	DittoXPublishOutcome* outcome = new DittoXPublishOutcome();
+	*outcome = DittoXPublish(job->payload);
+	if (job->ownerWnd != NULL && ::IsWindow(job->ownerWnd))
+	{
+		::PostMessage(job->ownerWnd, WM_DITTOX_PUBLISH_DONE, reinterpret_cast<WPARAM>(outcome), 0);
+	}
+	else
+	{
+		delete outcome; // cửa sổ đã đóng — không leak
+	}
+	return 0;
+}
+
+bool CQPasteWnd::DoDittoXPublishClip()
+{
+	// Hotkey lặp trong lúc upload đang chạy → bỏ qua, không gửi request thứ hai.
+	if (m_dittoxPublishing)
+	{
+		return true;
+	}
+
+	// Chỉ publish đúng một clip được chọn; khác → không request, không đổi clipboard.
+	if (m_lstHeader.GetSelectedCount() != 1)
+	{
+		return false;
+	}
+
+	CClipIDs ids;
+	m_lstHeader.GetSelectionItemData(ids);
+	if (ids.GetSize() != 1)
+	{
+		return false;
+	}
+
+	CClip clip;
+	if (!clip.LoadFormats(ids[0]))
+	{
+		return false;
+	}
+
+	// Ảnh thắng text như Ctrl+X; không có payload lưu được thì thoát không feedback success.
+	DittoXClipPayload payload;
+	if (!DittoXBuildPayloadFromClip(clip, payload))
+	{
+		ShowQuickExportFeedback(_T("Clip không có text/ảnh để publish"));
+		return true;
+	}
+
+	// Upload chạy nền (WinHTTP ngoài UI thread); kết quả về qua WM_DITTOX_PUBLISH_DONE.
+	std::unique_ptr<DittoXPublishJob> job(new DittoXPublishJob());
+	job->ownerWnd = GetSafeHwnd();
+	job->payload = payload;
+	DittoXPublishJob* rawJob = job.release();
+	CWinThread* thread = AfxBeginThread(DittoXPublishThreadProc, rawJob);
+	if (thread == NULL)
+	{
+		delete rawJob;
+		ShowQuickExportFeedback(_T("Không khởi động được upload"));
+		return true;
+	}
+
+	m_dittoxPublishing = true;
+	ShowQuickExportFeedback(_T("Đang tạo link public..."));
+	return true;
+}
+
+LRESULT CQPasteWnd::OnDittoXPublishDone(WPARAM wParam, LPARAM lParam)
+{
+	m_dittoxPublishing = false;
+
+	std::unique_ptr<DittoXPublishOutcome> outcome(reinterpret_cast<DittoXPublishOutcome*>(wParam));
+	if (!outcome)
+	{
+		return 0;
+	}
+
+	switch (outcome->status)
+	{
+	case DittoXPublishStatus::Success:
+	case DittoXPublishStatus::ReusedLink:
+	{
+		// Copy URL vào clipboard TRÊN UI THREAD: snapshot trước, lỗi → restore + verify.
+		DittoXClipboardCommitResult commit = DittoXCommitUrlToClipboard(outcome->fullUrl);
+		switch (commit)
+		{
+		case DittoXClipboardCommitResult::Committed:
+			// Chỉ báo đã copy sau khi URL thật sự nằm trong clipboard.
+			ShowQuickExportFeedback(outcome->fullUrl);
+			break;
+		case DittoXClipboardCommitResult::SnapshotFailed:
+			ShowQuickExportFeedback(_T("Không đọc được clipboard hiện tại — bỏ copy link để giữ nguyên nội dung cũ"));
+			break;
+		case DittoXClipboardCommitResult::CommitFailed:
+			ShowQuickExportFeedback(_T("Copy link lỗi — đã khôi phục clipboard cũ"));
+			break;
+		case DittoXClipboardCommitResult::RestoreFailed:
+			// Restore lỗi là release blocker (fault injection phải tái hiện được).
+			ShowQuickExportFeedback(_T("Clipboard lỗi: không khôi phục được nội dung cũ — kiểm tra clipboard"));
+			Log(_T("DittoXShareClient: RESTORE FAILED — clipboard may be missing old content"));
+			break;
+		}
+	}
+	break;
+	case DittoXPublishStatus::CredentialMissing:
+	case DittoXPublishStatus::TooLarge:
+	case DittoXPublishStatus::Network:
+	case DittoXPublishStatus::ServerReject:
+	case DittoXPublishStatus::InvalidResponse:
+	case DittoXPublishStatus::FinalizeUnconfirmed:
+	case DittoXPublishStatus::PendingReplayFailed:
+		ShowQuickExportFeedback(outcome->detail.IsEmpty() ? CString(_T("Publish lỗi")) : outcome->detail);
+		break;
+	}
+	return 0;
 }
 
 LRESULT CQPasteWnd::OnCancelFilter(WPARAM wParam, LPARAM lParam)

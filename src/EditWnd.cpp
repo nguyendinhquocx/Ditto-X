@@ -182,19 +182,19 @@ void CEditWnd::OnSave()
 	DoSave();
 }
 
-bool CEditWnd::DoSave()
+bool CEditWnd::DoSave(bool bDirectSaveNewClip)
 {
 	bool bRet = false;
 	int nTab = m_tabControl.GetActiveTab();
 	if(nTab >= 0 && nTab < (int)m_edits.size())
 	{
-		bRet = DoSaveItem(nTab);
+		bRet = DoSaveItem(nTab, bDirectSaveNewClip);
 	}
 
 	return bRet;
 }
 
-bool CEditWnd::DoSaveItem(int index)
+bool CEditWnd::DoSaveItem(int index, bool bDirectSaveNewClip)
 {
 	bool bRet = false;
 	BOOL bUpdateDesc = m_updateDescriptionButton.GetCheck();
@@ -202,7 +202,7 @@ bool CEditWnd::DoSaveItem(int index)
 	CDittoRulerRichEditCtrl *pEdit = m_edits[index];
 	if(pEdit)
 	{
-		int nRet = pEdit->SaveToDB(bUpdateDesc);
+		int nRet = pEdit->SaveToDB(bUpdateDesc, bDirectSaveNewClip);
 		if(nRet > 0)
 		{
 			if(bUpdateDesc)
@@ -429,7 +429,8 @@ void CEditWnd::OnForceClose()
 		{
 			//Save failed: keep the tab and its content, do not close (Ctrl+Q
 			//must never lose an edited clip because the DB write errored).
-			if(!DoSave())
+			//Ctrl+Q trên clip mới lưu thẳng (không Properties); Ctrl+S vẫn dùng luồng cũ.
+			if(!DoSave(true))
 			{
 				return;
 			}

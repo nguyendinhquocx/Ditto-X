@@ -134,6 +134,9 @@ CString ActionEnums::EnumDescription(ActionEnumValues value)
 	case EXPORT_TO_TEMP_AND_COPY_PATH:
 		val = "Quick Export To Temp And Copy Path";
 		break;
+	case DITTOX_PUBLISH_CLIP:
+		val = "Publish Public Clip Link";
+		break;
 	case SAVE_CURRENT_CLIPBOARD:
 		val = "Save Current Clipboard";
 		break;
@@ -526,6 +529,8 @@ int ActionEnums::GetDefaultShortCutKeyA(ActionEnumValues value, int pos)
 			return VK_F4;
 		case EXPORT_TO_TEMP_AND_COPY_PATH:
 			return ACCEL_MAKEKEY('X', HOTKEYF_CONTROL);
+		case DITTOX_PUBLISH_CLIP:
+			return ACCEL_MAKEKEY('Z', HOTKEYF_CONTROL);
 		}
 		break;
 	case 1:

@@ -180,6 +180,7 @@ public:
 	__int64 m_lastDbWrite;
 	bool m_pendingRefresh;
 	DWORD m_lastNonActiveMouseMove;
+	bool m_dittoxPublishing;	// Ctrl+Z upload đang chạy — hotkey lặp bị bỏ qua
 
     void RefreshNc();
     void UpdateStatus(bool bRepaintImmediately = false); // regenerates the status (caption) text
@@ -281,6 +282,8 @@ public:
 	bool DoExportToBitMapFile();
 	bool DoExportToTempAndCopyPath();
 	void ShowQuickExportFeedback(const CString& copiedPath);
+	bool DoDittoXPublishClip();
+	LRESULT OnDittoXPublishDone(WPARAM wParam, LPARAM lParam);
 	bool DoSaveCurrentClipboard();
 	bool DoMoveClipDown();
 	bool DoMoveClipUp();

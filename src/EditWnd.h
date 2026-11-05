@@ -35,8 +35,8 @@ protected:
 	void MoveControls();
 	int IsIDAlreadyInEdit(int id, bool bSetFocus);
 	bool AddItem(int id);
-	bool DoSave();
-	bool DoSaveItem(int index);
+	bool DoSave(bool bDirectSaveNewClip = false);
+	bool DoSaveItem(int index, bool bDirectSaveNewClip = false);
 	void LoadToolbarDPI();
 
 public:

@@ -12,7 +12,7 @@ public:
 	enum eSaveTypes{stNONE = 0x1, stCF_TEXT = 0x2, stCF_UNICODETEXT = 0x4, stRTF = 0x8};
 
 	bool LoadItem(long lID, CString csDesc);
-	int SaveToDB(BOOL bUpdateDesc);
+	int SaveToDB(BOOL bUpdateDesc, bool bDirectSaveNewClip = false);
 	long GetTypeFlags(long lID);
 	bool CloseEdit(bool bPrompt, BOOL bUpdateDesc);
 	long GetDBID()		{ return m_lID; }

@@ -126,7 +126,7 @@ void CDittoRulerRichEditCtrl::d()
 	MessageBox(s);
 }
 
-int CDittoRulerRichEditCtrl::SaveToDB(BOOL bUpdateDesc)
+int CDittoRulerRichEditCtrl::SaveToDB(BOOL bUpdateDesc, bool bDirectSaveNewClip)
 {
 	int nRet = FALSE;
 
@@ -180,6 +180,37 @@ int CDittoRulerRichEditCtrl::SaveToDB(BOOL bUpdateDesc)
 		if(m_lID >= 0)
 		{
 			Clip.SaveFromEditWnd(bUpdateDesc);
+		}
+		else if(bDirectSaveNewClip)
+		{
+			// Ctrl+Q trên clip mới (SPEC-2026-11-05): lưu thẳng metadata mặc định,
+			// KHÔNG mở hộp Properties. DB fail vẫn quăng exception → caller giữ draft.
+			bSetModifyToFalse = false;
+
+			if (Clip.m_Formats.GetSize() <= 0)
+			{
+				// Không có format nào lưu được → coi như không có gì để lưu (đóng êm).
+				return DIDNT_NEED_TO_SAVE;
+			}
+
+			// Draft rỗng/whitespace-only thì bỏ, không tạo DB row. Plaintext trống nhưng
+			// vẫn có RTF/ảnh nhúng thì vẫn lưu (không phân loại rỗng chỉ vì plaintext trống).
+			CString directText = Clip.GetUnicodeTextFormat();
+			if (directText.Trim().IsEmpty())
+			{
+				bool hasRtf = Clip.ContainsClipFormat(theApp.m_RTFFormat);
+				bool hasImage = Clip.ContainsClipFormat(CF_DIB) || Clip.ContainsClipFormat(theApp.m_PNG_Format);
+				if (!hasRtf && !hasImage)
+				{
+					return DIDNT_NEED_TO_SAVE;
+				}
+			}
+
+			Clip.AddToDB();
+			m_csDescription = Clip.m_Desc;
+			m_lID = Clip.m_id;
+			bUpdateDesc = TRUE;
+			bSetModifyToFalse = true;
 		}
 		else
 		{
