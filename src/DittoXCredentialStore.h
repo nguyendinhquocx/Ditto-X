@@ -1,4 +1,4 @@
-#pragma once
+﻿#pragma once
 
 // Ditto-X Share credential (SPEC-2026-11-05): giá trị chỉ sống trong Windows Credential
 // Manager; KHÔNG có plaintext fallback trong source/config/log/build. Thiếu key = Ctrl+Z

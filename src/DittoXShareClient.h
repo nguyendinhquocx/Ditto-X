@@ -1,4 +1,4 @@
-#pragma once
+﻿#pragma once
 
 // Ditto-X Share client (SPEC-2026-11-05-dittox-quick-handoff-public-clip).
 //

@@ -1,4 +1,4 @@
-// Đọc Ditto credential từ Windows Credential Manager (CredReadW, CRED_TYPE_GENERIC).
+﻿// Đọc Ditto credential từ Windows Credential Manager (CredReadW, CRED_TYPE_GENERIC).
 // Blob do tools/dittox-share-credential-setup.ps1 ghi dưới dạng UTF-8/ASCII bytes.
 // Không có plaintext fallback — thiếu entry / lỗi API đều trả false.
 

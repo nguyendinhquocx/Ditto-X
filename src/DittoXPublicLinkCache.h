@@ -1,4 +1,4 @@
-#pragma once
+﻿#pragma once
 
 // Cache/pending public clip link cho Ditto-X (SPEC-2026-11-05).
 //

@@ -6,7 +6,7 @@
 # log hay file. Ditto (DittoXCredentialStore) đọc đúng target này.
 #
 # Dùng:
-#   powershell -ExecutionPolicy Bypass -File .\dittox-share-credential-setup.ps1            # đặt/xoá rồi đặt mới
+#   powershell -ExecutionPolicy Bypass -File .\dittox-share-credential-setup.ps1            # lưu mới hoặc cập nhật entry hiện có
 #   powershell -ExecutionPolicy Bypass -File .\dittox-share-credential-setup.ps1 -Remove    # xoá entry
 #
 # Key được cấp kèm Worker secret (xem docs/operations.md của share.quoc.app);

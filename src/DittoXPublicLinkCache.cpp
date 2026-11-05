@@ -1,4 +1,4 @@
-// Cache/pending public clip link — bảng SQLite additive `DittoXPublicLinks`.
+﻿// Cache/pending public clip link — bảng SQLite additive `DittoXPublicLinks`.
 // Xem DittoXPublicLinkCache.h cho contract. KHÔNG lưu nội dung clip.
 
 #include "stdafx.h"

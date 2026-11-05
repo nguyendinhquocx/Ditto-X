@@ -1,4 +1,4 @@
-// Ditto-X Share client (SPEC-2026-11-05). Xem DittoXShareClient.h cho contract đầy đủ.
+﻿// Ditto-X Share client (SPEC-2026-11-05). Xem DittoXShareClient.h cho contract đầy đủ.
 //
 // Retry contract (bounded, khớp reference client readerx/Side Browser):
 //  - upload-session: network/5xx → retry đúng 1 lần CÙNG key/manifest (idempotent replay).
@@ -312,7 +312,7 @@ namespace
 		for (int i = 0; i < trimmed.GetLength(); i++)
 		{
 			wchar_t ch = trimmed[i];
-			if (ch < 0x20 || ch > 0x7E) return false;
+			if (ch < 0x21 || ch > 0x7E) return false; // no spaces/control chars in Bearer tokens
 		}
 		keyOut = WideToUtf8(trimmed);
 		return !keyOut.IsEmpty();
@@ -711,12 +711,6 @@ namespace
 		return true;
 	}
 
-	bool IsValidFutureExpiry(const CStringW& expiresAt)
-	{
-		const long long expiryMs = DittoXIsoToEpochMs(expiresAt);
-		return expiryMs != LLONG_MIN && expiryMs > DittoXUtcNowEpochMs();
-	}
-
 	// --- Publish state machine ---
 
 	DittoXPublishOutcome MapServerError(const CStringA& error)
@@ -909,8 +903,22 @@ namespace
 	{
 		DittoXPublishOutcome outcome;
 		FinalizeResponse finalize = FinalizeWithRetry(ctx, sessionId);
-		if (finalize.ok && IsValidClipViewerPath(finalize.viewerUrl) && IsValidFutureExpiry(finalize.expiresAt))
+		if (finalize.ok && IsValidClipViewerPath(finalize.viewerUrl))
 		{
+			const long long expiryMs = DittoXIsoToEpochMs(finalize.expiresAt);
+			if (expiryMs != LLONG_MIN && expiryMs <= DittoXUtcNowEpochMs())
+			{
+				CDittoXPublicLinkCache::RemovePending(db, ctx.idempotencyKey);
+				outcome.status = DittoXPublishStatus::PendingReplayFailed;
+				outcome.detail = L"Link đã hết hạn trước khi khôi phục. Nhấn Ctrl+Z để tạo link mới.";
+				return outcome;
+			}
+			if (expiryMs == LLONG_MIN)
+			{
+				outcome.status = DittoXPublishStatus::FinalizeUnconfirmed;
+				outcome.detail = L"Không xác nhận được expiry. Link có thể đã tạo — Ctrl+Z lần sau sẽ thử khôi phục.";
+				return outcome;
+			}
 			CDittoXPublicLinkCache::MarkPublished(db, ctx.idempotencyKey,
 				finalize.viewerUrl, finalize.expiresAt, DittoXUtcNowIso());
 			outcome.status = DittoXPublishStatus::Success;
@@ -1695,8 +1703,22 @@ DittoXPublishOutcome DittoXPublish(const DittoXClipPayload& payload)
 	}
 
 	FinalizeResponse finalize = FinalizeWithRetry(ctx, session.sessionId);
-	if (finalize.ok && IsValidClipViewerPath(finalize.viewerUrl) && IsValidFutureExpiry(finalize.expiresAt))
+	if (finalize.ok && IsValidClipViewerPath(finalize.viewerUrl))
 	{
+		const long long expiryMs = DittoXIsoToEpochMs(finalize.expiresAt);
+		if (expiryMs != LLONG_MIN && expiryMs <= DittoXUtcNowEpochMs())
+		{
+			CDittoXPublicLinkCache::RemovePending(db, ctx.idempotencyKey);
+			outcome.status = DittoXPublishStatus::PendingReplayFailed;
+			outcome.detail = L"Link đã hết hạn trước khi copy. Nhấn Ctrl+Z để tạo link mới.";
+			return outcome;
+		}
+		if (expiryMs == LLONG_MIN)
+		{
+			outcome.status = DittoXPublishStatus::FinalizeUnconfirmed;
+			outcome.detail = L"Không xác nhận được expiry. Link có thể đã tạo — Ctrl+Z lần sau sẽ thử khôi phục.";
+			return outcome;
+		}
 		CDittoXPublicLinkCache::MarkPublished(db, ctx.idempotencyKey,
 			finalize.viewerUrl, finalize.expiresAt, DittoXUtcNowIso());
 		outcome.status = DittoXPublishStatus::Success;
