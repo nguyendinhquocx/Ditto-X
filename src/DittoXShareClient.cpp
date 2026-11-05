@@ -1747,10 +1747,23 @@ namespace
 		return "";
 	}
 
-	bool DittoXExtractRtfBlip(const CStringA& rtf, std::vector<BYTE>& imageBytes, bool& isPngBlip, int* pictPosOut = nullptr, int* groupEndOut = nullptr)
+	struct DittoXRtfBlip
 	{
-		imageBytes.clear();
-		isPngBlip = false;
+		std::vector<BYTE> bytes;
+		bool isPng = false;
+		int pictPos = -1;
+		int groupEnd = -1;
+	};
+
+	// Tách TẤT CẢ blip PNG/JPEG nhúng trong RTF (mỗi {\pict} một entry, theo
+	// thứ tự xuất hiện). Clip từ editor/Word/Outlook giữ ảnh bên trong RTF —
+	// không có CF_DIB/PNG riêng nên nhánh image thường không thấy. Vùng data =
+	// phần sau control word CUỐI của group (RichEdit ngắt hex mỗi ~78 ký tự
+	// nên phải nối nhiều run, bỏ newline). Metafile/EMF bị bỏ qua — caller
+	// vẫn giữ text hai bên, chỉ mất đúng ảnh không decode được.
+	bool DittoXExtractRtfBlips(const CStringA& rtf, std::vector<DittoXRtfBlip>& blips)
+	{
+		blips.clear();
 
 		int searchFrom = 0;
 		while (true)
@@ -1758,7 +1771,7 @@ namespace
 			int pictPos = rtf.Find("{\\pict", searchFrom);
 			if (pictPos < 0)
 			{
-				return false;
+				return !blips.empty();
 			}
 
 			int depth = 1;
@@ -1772,8 +1785,6 @@ namespace
 			// scan đứng sau '}' đóng của group \pict
 			int groupEnd = depth == 0 ? scan - 1 : rtf.GetLength() - 1;
 			searchFrom = groupEnd + 1;
-			if (pictPosOut) *pictPosOut = pictPos;
-			if (groupEndOut) *groupEndOut = groupEnd;
 
 			CStringA group = rtf.Mid(pictPos, groupEnd - pictPos + 1);
 			bool pngBlip = group.Find("\\pngblip") >= 0;
@@ -1828,7 +1839,10 @@ namespace
 				continue;
 			}
 
-			imageBytes.reserve(hexCount / 2);
+			DittoXRtfBlip blip;
+			blip.pictPos = pictPos;
+			blip.groupEnd = groupEnd;
+			blip.bytes.reserve(hexCount / 2);
 			int hi = -1;
 			for (int k = lastCtrlEnd; k < dataEnd; k++)
 			{
@@ -1841,24 +1855,23 @@ namespace
 					}
 					else
 					{
-						imageBytes.push_back(static_cast<BYTE>((hi << 4) | v));
+						blip.bytes.push_back(static_cast<BYTE>((hi << 4) | v));
 						hi = -1;
 					}
 				}
 			}
 
 			// Xác nhận magic để không nhặt hex giả.
-			bool pngMagic = imageBytes.size() >= 4 && imageBytes[0] == 0x89 &&
-				imageBytes[1] == 'P' && imageBytes[2] == 'N' && imageBytes[3] == 'G';
-			bool jpegMagic = imageBytes.size() >= 2 && imageBytes[0] == 0xFF && imageBytes[1] == 0xD8;
+			bool pngMagic = blip.bytes.size() >= 4 && blip.bytes[0] == 0x89 &&
+				blip.bytes[1] == 'P' && blip.bytes[2] == 'N' && blip.bytes[3] == 'G';
+			bool jpegMagic = blip.bytes.size() >= 2 && blip.bytes[0] == 0xFF && blip.bytes[1] == 0xD8;
 			if (!pngMagic && !jpegMagic)
 			{
-				imageBytes.clear();
 				continue;
 			}
 
-			isPngBlip = pngMagic;
-			return true;
+			blip.isPng = pngMagic;
+			blips.push_back(std::move(blip));
 		}
 	}
 
@@ -1900,6 +1913,10 @@ bool DittoXBuildPayloadFromClip(CClip& clip, DittoXClipPayload& payload)
 {
 	payload.assets.clear();
 	payload.markdownUtf8.Empty();
+
+	// 0) Text: lấy trước (formats đã load trong memory) để các nhánh ảnh fallback
+	// khi decode fail đều dùng được.
+	CStringA textUtf8 = DittoXPlainTextUtf8(clip);
 
 	// 1) Ảnh: CF_DIB/PNG standalone, hoặc blip PNG/JPEG nhúng trong RTF.
 	std::vector<BYTE> pngBytes;
@@ -1947,39 +1964,62 @@ bool DittoXBuildPayloadFromClip(CClip& clip, DittoXClipPayload& payload)
 				::GlobalUnlock(rtfFormat->m_hgData);
 			}
 
-			std::vector<BYTE> blipBytes;
-			bool blipIsPng = false;
-			int pictPos = -1, groupEnd = -1;
-			if (rtfSize > 0 && DittoXExtractRtfBlip(rtfText, blipBytes, blipIsPng, &pictPos, &groupEnd))
+			std::vector<DittoXRtfBlip> blips;
+			if (rtfSize > 0 && DittoXExtractRtfBlips(rtfText, blips))
 			{
-				pngBytes = DittoXImageBytesToPNG(blipBytes, blipIsPng);
-				if (pngBytes.empty())
+				// Decode từng blip; decode fail mất đúng ảnh đó, không hủy payload.
+				std::vector<std::vector<BYTE>> images;
+				for (const DittoXRtfBlip& blip : blips)
 				{
-					LogClient(L"RTF có ảnh nhúng nhưng không decode được");
-				}
-				else
-				{
-					// Thứ tự gốc của clip: text trước/sau group pict giữ nguyên vị trí
-					// quanh ảnh trong markdown. Fallback CF_UNICODETEXT chỉ dùng khi
-					// RTF không có text hai bên.
-					CStringA beforeUtf8 = DittoXRtfSpanToUtf8(rtfText, 0, pictPos);
-					CStringA afterUtf8 = DittoXRtfSpanToUtf8(rtfText, groupEnd + 1, rtfText.GetLength());
-					CStringA markdown;
-					if (!beforeUtf8.IsEmpty()) markdown += beforeUtf8 + "\n\n";
-					markdown += "![clip](img/clip-0.png)\n";
-					if (!afterUtf8.IsEmpty()) markdown += "\n" + afterUtf8 + "\n";
-					if (beforeUtf8.IsEmpty() && afterUtf8.IsEmpty())
+					std::vector<BYTE> decoded = DittoXImageBytesToPNG(blip.bytes, blip.isPng);
+					if (decoded.empty())
 					{
-						// RTF thuần ảnh — dùng text từ formats nếu có (đặt trước ảnh
-						// như behavior mixed mặc định).
-						CStringA fallback = DittoXPlainTextUtf8(clip);
-						if (!fallback.IsEmpty()) markdown = fallback + "\n\n" + markdown;
+						LogClient(L"RTF có ảnh nhúng nhưng không decode được — bỏ ảnh này");
 					}
-					DittoXClipAsset asset;
-					asset.canonicalPath = L"img/clip-0.png";
-					asset.contentType = "image/png";
-					asset.bytes.swap(pngBytes);
-					payload.assets.push_back(asset);
+					else
+					{
+						images.push_back(std::move(decoded));
+					}
+				}
+
+				if (!images.empty())
+				{
+					// Thứ tự gốc của clip: đi qua từng vị trí pict, text giữa các ảnh
+					// giữ nguyên vị trí trong markdown; mỗi ảnh tham chiếu img/clip-N.png.
+					CStringA markdown;
+					int searchPos = 0;
+					int imageIndex = 0;
+					for (const DittoXRtfBlip& blip : blips)
+					{
+						CStringA before = DittoXRtfSpanToUtf8(rtfText, searchPos, blip.pictPos);
+						if (!before.IsEmpty()) markdown += before + "\n\n";
+						if (imageIndex < static_cast<int>(images.size()))
+						{
+							CStringA ref;
+							ref.Format("![clip](img/clip-%d.png)\n", imageIndex);
+							markdown += ref;
+							DittoXClipAsset asset;
+							asset.canonicalPath.Format(L"img/clip-%d.png", imageIndex);
+							asset.contentType = "image/png";
+							asset.bytes = std::move(images[imageIndex]);
+							payload.assets.push_back(asset);
+							imageIndex++;
+						}
+						searchPos = blip.groupEnd + 1;
+					}
+					CStringA tail = DittoXRtfSpanToUtf8(rtfText, searchPos, rtfText.GetLength());
+					if (!tail.IsEmpty()) markdown += "\n" + tail + "\n";
+
+					if (imageIndex == 0)
+					{
+						// Không decode được ảnh nào — dùng text thuần như behavior cũ.
+						payload.markdownUtf8 = textUtf8;
+						return !payload.markdownUtf8.IsEmpty();
+					}
+					if (imageIndex < static_cast<int>(images.size()))
+					{
+						payload.assets.resize(imageIndex);
+					}
 					payload.markdownUtf8 = markdown;
 					return true;
 				}
@@ -1987,8 +2027,7 @@ bool DittoXBuildPayloadFromClip(CClip& clip, DittoXClipPayload& payload)
 		}
 	}
 
-	// 2) Text: lấy qua DittoXPlainTextUtf8 (whitespace-only → rỗng).
-	CStringA textUtf8 = DittoXPlainTextUtf8(clip);
+	// 2) Text đã lấy ở bước 0.
 
 	// 3) Compose: có ảnh lẫn text → text + tham chiếu ảnh (không mất nội dung
 	// nào); một trong hai → y như behavior cũ. Trống cả hai → không publish.
