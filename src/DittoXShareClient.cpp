@@ -1681,91 +1681,113 @@ bool DittoXBuildPayloadFromClip(CClip& clip, DittoXClipPayload& payload)
 	payload.assets.clear();
 	payload.markdownUtf8.Empty();
 
+	// 1) Ảnh: CF_DIB/PNG standalone, hoặc blip PNG/JPEG nhúng trong RTF.
+	std::vector<BYTE> pngBytes;
 	CClipFormat* bitmap = clip.m_Formats.FindFormat(CF_DIB);
 	CClipFormat* png = clip.m_Formats.FindFormat(theApp.m_PNG_Format);
 
 	if (bitmap || png)
 	{
-		// Ảnh thắng text như Ctrl+X: encode PNG trong memory, không tạo file tạm.
+		// Ảnh encode PNG trong memory, không tạo file tạm. Decode fail không
+		// hủy cả payload — còn text thì vẫn publish text.
 		std::shared_ptr<CImage> image = png
 			? PNGImageHelper::CImageFromHGLOBAL(png->m_hgData)
 			: DIBImageHelper::CImageFromHGLOBAL(bitmap->m_hgData);
 		if (!image)
 		{
 			LogClient(L"không decode được ảnh từ clip");
-			return false;
 		}
-		std::vector<BYTE> pngBytes = CImageToPNGBytes(*image, Gdiplus::ImageFormatPNG);
-		if (pngBytes.empty())
+		else
 		{
-			LogClient(L"encode PNG trong memory lỗi");
-			return false;
-		}
-		DittoXClipAsset asset;
-		asset.canonicalPath = L"img/clip-0.png";
-		asset.contentType = "image/png";
-		asset.bytes.swap(pngBytes);
-		payload.assets.push_back(asset);
-		payload.markdownUtf8 = "![clip](img/clip-0.png)\n";
-		return true;
-	}
-
-	// Ảnh nhúng trong RTF (\pict) cũng thắng text: clip từ editor/Word/Outlook
-	// giữ ảnh bên trong RTF, không có CF_DIB/PNG riêng. Tách hỏng/metafile thì
-	// rơi xuống text như trước, không mất text.
-	CClipFormat* rtfFormat = clip.m_Formats.FindFormat(theApp.m_RTFFormat);
-	if (rtfFormat && rtfFormat->m_hgData)
-	{
-		const char* rtfData = static_cast<const char*>(::GlobalLock(rtfFormat->m_hgData));
-		SIZE_T rtfSize = rtfData ? ::GlobalSize(rtfFormat->m_hgData) : 0;
-		CStringA rtfText;
-		if (rtfData && rtfSize > 0)
-		{
-			rtfText = CStringA(rtfData, static_cast<int>(rtfSize));
-		}
-		if (rtfData)
-		{
-			::GlobalUnlock(rtfFormat->m_hgData);
-		}
-
-		std::vector<BYTE> blipBytes;
-		bool blipIsPng = false;
-		if (rtfSize > 0 && DittoXExtractRtfBlip(rtfText, blipBytes, blipIsPng))
-		{
-			std::vector<BYTE> pngBytes = DittoXImageBytesToPNG(blipBytes, blipIsPng);
-			if (!pngBytes.empty())
+			pngBytes = CImageToPNGBytes(*image, Gdiplus::ImageFormatPNG);
+			if (pngBytes.empty())
 			{
-				DittoXClipAsset asset;
-				asset.canonicalPath = L"img/clip-0.png";
-				asset.contentType = "image/png";
-				asset.bytes.swap(pngBytes);
-				payload.assets.push_back(asset);
-				payload.markdownUtf8 = "![clip](img/clip-0.png)\n";
-				return true;
+				LogClient(L"encode PNG trong memory lỗi");
 			}
-			LogClient(L"RTF có ảnh nhúng nhưng không decode được — publish text");
 		}
 	}
 
+	if (pngBytes.empty())
+	{
+		// Ảnh nhúng trong RTF (\pict): clip từ editor/Word/Outlook giữ ảnh bên
+		// trong RTF, không có CF_DIB/PNG riêng. Tách hỏng/metafile thì bỏ qua,
+		// vẫn publish text thay vì mất cả payload.
+		CClipFormat* rtfFormat = clip.m_Formats.FindFormat(theApp.m_RTFFormat);
+		if (rtfFormat && rtfFormat->m_hgData)
+		{
+			const char* rtfData = static_cast<const char*>(::GlobalLock(rtfFormat->m_hgData));
+			SIZE_T rtfSize = rtfData ? ::GlobalSize(rtfFormat->m_hgData) : 0;
+			CStringA rtfText;
+			if (rtfData && rtfSize > 0)
+			{
+				rtfText = CStringA(rtfData, static_cast<int>(rtfSize));
+			}
+			if (rtfData)
+			{
+				::GlobalUnlock(rtfFormat->m_hgData);
+			}
+
+			std::vector<BYTE> blipBytes;
+			bool blipIsPng = false;
+			if (rtfSize > 0 && DittoXExtractRtfBlip(rtfText, blipBytes, blipIsPng))
+			{
+				pngBytes = DittoXImageBytesToPNG(blipBytes, blipIsPng);
+				if (pngBytes.empty())
+				{
+					LogClient(L"RTF có ảnh nhúng nhưng không decode được");
+				}
+			}
+		}
+	}
+
+	// 2) Text: CF_UNICODETEXT ưu tiên, fallback CF_TEXT. Text whitespace-only
+	// không tính (nhưng có ảnh thì vẫn publish ảnh).
+	CStringA textUtf8;
 	if (clip.ContainsClipFormat(CF_UNICODETEXT))
 	{
 		CString text = clip.GetUnicodeTextFormat();
 		CString trimmed(text);
 		trimmed.Trim();
-		if (trimmed.IsEmpty()) return false; // no empty/whitespace-only public clip
-		payload.markdownUtf8 = CTextConvert::UnicodeToUTF8(text);
-		return !payload.markdownUtf8.IsEmpty();
+		if (!trimmed.IsEmpty())
+		{
+			textUtf8 = CTextConvert::UnicodeToUTF8(text);
+		}
 	}
-	if (clip.ContainsClipFormat(CF_TEXT))
+	if (textUtf8.IsEmpty() && clip.ContainsClipFormat(CF_TEXT))
 	{
 		CString text = CTextConvert::AnsiToUnicode(clip.GetCFTextTextFormat());
 		CString trimmed(text);
 		trimmed.Trim();
-		if (trimmed.IsEmpty()) return false;
-		payload.markdownUtf8 = CTextConvert::UnicodeToUTF8(text);
-		return !payload.markdownUtf8.IsEmpty();
+		if (!trimmed.IsEmpty())
+		{
+			textUtf8 = CTextConvert::UnicodeToUTF8(text);
+		}
 	}
 
+	// 3) Compose: có ảnh lẫn text → text + tham chiếu ảnh (không mất nội dung
+	// nào); một trong hai → y như behavior cũ. Trống cả hai → không publish.
+	if (!pngBytes.empty())
+	{
+		DittoXClipAsset asset;
+		asset.canonicalPath = L"img/clip-0.png";
+		asset.contentType = "image/png";
+		asset.bytes.swap(pngBytes);
+		payload.assets.push_back(asset);
+		if (!textUtf8.IsEmpty())
+		{
+			payload.markdownUtf8 = textUtf8 + "\n\n![clip](img/clip-0.png)\n";
+		}
+		else
+		{
+			payload.markdownUtf8 = "![clip](img/clip-0.png)\n";
+		}
+		return true;
+	}
+	if (!textUtf8.IsEmpty())
+	{
+		payload.markdownUtf8 = textUtf8;
+		return true;
+	}
 	return false;
 }
 
