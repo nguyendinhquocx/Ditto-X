@@ -124,8 +124,9 @@ try
     $credential.Persist = [DittoXCred]::CRED_PERSIST_LOCAL_MACHINE
     $credential.AttributeCount = 0
     $credential.Attributes = [System.IntPtr]::Zero
-    $credential.TargetAlias = [string]::Empty
-    $credential.UserName = [string]::Empty
+    # Generic credentials must keep TargetAlias NULL; null UserName avoids an empty LPWSTR too.
+    $credential.TargetAlias = $null
+    $credential.UserName = $null
 
     if (-not [DittoXCred]::CredWrite([ref]$credential, 0))
     {

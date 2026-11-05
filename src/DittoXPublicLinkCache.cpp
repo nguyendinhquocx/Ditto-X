@@ -191,14 +191,53 @@ void CDittoXPublicLinkCache::PruneExpired(CppSQLite3DB& db, const CStringW& nowI
 {
 	try
 	{
-		// So sánh ISO string đủ đúng cho cùng format UTC (server + local đều 'Z' suffix);
-		// mốc pending dùng epoch để tính 2 giờ.
-		long long nowMs = DittoXIsoToEpochMs(nowIso);
-		CStringW staleIso = DittoXEpochMsToIso(nowMs - PENDING_STALE_MS);
-		db.execDMLEx(_T("DELETE FROM DittoXPublicLinks WHERE state = 'published' AND expires_at <= '%s';"),
-			nowIso.GetString());
-		db.execDMLEx(_T("DELETE FROM DittoXPublicLinks WHERE state = 'pending' AND created_at <= '%s';"),
-			staleIso.GetString());
+		// Compare parsed epoch values, not ISO strings: old/new clients may persist
+		// timestamps with or without milliseconds, whose lexical order differs at Z.
+		const long long nowMs = DittoXIsoToEpochMs(nowIso);
+		if (nowMs == LLONG_MIN) return;
+		const long long stalePendingMs = nowMs - PENDING_STALE_MS;
+
+		std::vector<CStringW> expiredManifestHashes;
+		{
+			CppSQLite3Query query = db.execQuery(
+				_T("SELECT manifest_hash, expires_at FROM DittoXPublicLinks ")
+				_T("WHERE state = 'published' AND expires_at IS NOT NULL;"));
+			while (!query.eof())
+			{
+				CStringW manifestHash((LPCWSTR)query.fieldValue(_T("manifest_hash")));
+				CStringW expiresAt((LPCWSTR)query.fieldValue(_T("expires_at")));
+				const long long expiresMs = DittoXIsoToEpochMs(expiresAt);
+				if (expiresMs != LLONG_MIN && expiresMs <= nowMs)
+					expiredManifestHashes.push_back(manifestHash);
+				query.nextRow();
+			}
+		}
+		for (const CStringW& manifestHash : expiredManifestHashes)
+		{
+			db.execDMLEx(_T("DELETE FROM DittoXPublicLinks WHERE state = 'published' AND manifest_hash = '%s';"),
+				manifestHash.GetString());
+		}
+
+		std::vector<CStringW> staleIdempotencyKeys;
+		{
+			CppSQLite3Query query = db.execQuery(
+				_T("SELECT idempotency_key, created_at FROM DittoXPublicLinks ")
+				_T("WHERE state = 'pending' AND created_at IS NOT NULL;"));
+			while (!query.eof())
+			{
+				CStringW idempotencyKey((LPCWSTR)query.fieldValue(_T("idempotency_key")));
+				CStringW createdAt((LPCWSTR)query.fieldValue(_T("created_at")));
+				const long long createdMs = DittoXIsoToEpochMs(createdAt);
+				if (createdMs != LLONG_MIN && createdMs <= stalePendingMs)
+					staleIdempotencyKeys.push_back(idempotencyKey);
+				query.nextRow();
+			}
+		}
+		for (const CStringW& idempotencyKey : staleIdempotencyKeys)
+		{
+			db.execDMLEx(_T("DELETE FROM DittoXPublicLinks WHERE state = 'pending' AND idempotency_key = '%s';"),
+				idempotencyKey.GetString());
+		}
 	}
 	CATCH_SQLITE_EXCEPTION
 }

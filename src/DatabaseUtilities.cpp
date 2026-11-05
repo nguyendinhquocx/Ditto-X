@@ -1,4 +1,4 @@
-// DatabaseUtilites.cpp: implementation of the CDatabaseUtilites class.
+﻿// DatabaseUtilites.cpp: implementation of the CDatabaseUtilites class.
 //
 //////////////////////////////////////////////////////////////////////
 

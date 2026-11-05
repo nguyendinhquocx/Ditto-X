@@ -1,4 +1,4 @@
-#pragma once
+﻿#pragma once
 
 #include "QListCtrl.h"
 #include "SearchEditBox.h"

@@ -1,4 +1,4 @@
-#include "stdafx.h"
+﻿#include "stdafx.h"
 #include "clip.h"
 #include "CP_Main.h"
 #include "..\shared\TextConvert.h"

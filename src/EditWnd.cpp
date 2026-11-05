@@ -1,4 +1,4 @@
-// EditWnd.cpp : implementation file
+﻿// EditWnd.cpp : implementation file
 //
 
 #include "stdafx.h"
