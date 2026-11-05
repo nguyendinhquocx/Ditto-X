@@ -9,6 +9,10 @@ on:
 
 env:
   SOLUTION_FILE_PATH: CP_Main_10.sln
+  # Ditto-X fork (2026-11-05): SignPath/Chocolatey chỉ chạy khi secret tồn tại;
+  # fork không có secret nên các bước này skip — push master không đụng dịch vụ bên ngoài.
+  HAS_SIGNPATH: ${{ secrets.SIGNPATH_API_TOKEN != '' }}
+  HAS_CHOCO: ${{ secrets.CHOCO_API_KEY != '' }}
 
 jobs:
   build:
@@ -54,6 +58,7 @@ jobs:
             Release64\Addins\DittoUtil.dll
             
       - id: sign-exe
+        if: env.HAS_SIGNPATH == 'true'
         uses: signpath/github-action-submit-signing-request@v1.1
         with:
           api-token: '${{ secrets.SIGNPATH_API_TOKEN }}'
@@ -79,6 +84,7 @@ jobs:
           path: DittoSetup\output\DittoSetup_${{env.VERSION_FILENAME}}.exe
           
       - id: sing-installer
+        if: env.HAS_SIGNPATH == 'true'
         uses: signpath/github-action-submit-signing-request@v1.1
         with:
           api-token: '${{ secrets.SIGNPATH_API_TOKEN }}'
@@ -100,6 +106,7 @@ jobs:
             7z a DittoSetup\output\DittoDebug_${{env.VERSION_FILENAME}}.7z *.map -r
             
       - name: Choco - Ditto
+        if: env.HAS_CHOCO == 'true'
         run: |
             (Get-Content 'DittoSetup\Chocolatey\ditto.nuspec' -Raw).Replace("%version%", "${{env.VERSION_DOT_FILENAME}}") | Out-File 'DittoSetup\Chocolatey\ditto.nuspec'
             copy DittoSetup\Output\DittoSetup_${{env.VERSION_FILENAME}}.exe DittoSetup\Chocolatey\tools\DittoSetup_${{env.VERSION_FILENAME}}.exe
@@ -110,6 +117,7 @@ jobs:
             cd ..
             
       - name: Choco - Ditto.Install
+        if: env.HAS_CHOCO == 'true'
         run: |
             (Get-Content 'DittoSetup\Chocolatey.install\ditto.nuspec' -Raw).Replace("%version%", "${{env.VERSION_DOT_FILENAME}}") | Out-File 'DittoSetup\Chocolatey.install\ditto.nuspec'
             copy DittoSetup\output\DittoSetup_${{env.VERSION_FILENAME}}.exe DittoSetup\Chocolatey.install\tools\DittoSetup_${{env.VERSION_FILENAME}}.exe
@@ -120,6 +128,7 @@ jobs:
             cd ..
     
       - name: Choco - Ditto.Portable
+        if: env.HAS_CHOCO == 'true'
         run: |
             (Get-Content 'DittoSetup\Chocolatey.portable\ditto.nuspec' -Raw).Replace("%version%", "${{env.VERSION_DOT_FILENAME}}") | Out-File 'DittoSetup\Chocolatey.portable\ditto.nuspec'
             copy DittoSetup\output\DittoPortable_${{env.VERSION_FILENAME}}.zip DittoSetup\Chocolatey.portable\tools\DittoPortable_${{env.VERSION_FILENAME}}.zip
@@ -130,6 +139,8 @@ jobs:
             cd ..
             
       - name: Build appx
+        # Owner 2026-11-05: tắt AppX cho Ditto-X fork release lần này.
+        if: false
         run: |
             7z x DittoSetup\output\DittoPortable_${{env.VERSION_FILENAME}}.zip -oDittoSetup\appx -r
             (Get-Content 'DittoSetup\appx\appxmanifest.xml' -Raw).Replace("%version%", "${{env.VERSION_DOT_FILENAME}}") | Out-File 'DittoSetup\appx\appxmanifest.xml'  
@@ -144,6 +155,7 @@ jobs:
             copy DittoSetup\appx\Ditto_${{env.VERSION_FILENAME}}.appx DittoSetup\Output\Ditto_${{env.VERSION_FILENAME}}.appx
     
       - name: Publish to GitHub
+        continue-on-error: true
         env:
           token: ${{secrets.GITHUB_TOKEN}}
           uploadPath: DittoSetup\output\
