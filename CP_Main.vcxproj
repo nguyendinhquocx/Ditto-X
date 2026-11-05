@@ -1,4 +1,4 @@
-﻿<?xml version="1.0" encoding="utf-8"?>
+<?xml version="1.0" encoding="utf-8"?>
 <Project DefaultTargets="Build" ToolsVersion="15.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
   <ItemGroup Label="ProjectConfigurations">
     <ProjectConfiguration Include="Debug|ARM64">
@@ -92,6 +92,12 @@
     <Import Project="$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props" Condition="exists('$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props')" />
   </ImportGroup>
   <PropertyGroup Label="UserMacros" />
+  <!-- Ditto-X (SPEC-2026-11-05): candidate build không đè Ditto.exe đang chạy.
+       Mặc định Ditto → release64\Ditto.exe như cũ; build candidate:
+       msbuild CP_Main.vcxproj -p:DittoXTargetName=Ditto-X-candidate ... -->
+  <PropertyGroup>
+    <DittoXTargetName Condition="'$(DittoXTargetName)' == ''">Ditto</DittoXTargetName>
+  </PropertyGroup>
   <PropertyGroup>
     <_ProjectFileVersion>10.0.21006.1</_ProjectFileVersion>
     <OutDir Condition="'$(Configuration)|$(Platform)'=='Release|x64'">.\Release\</OutDir>
@@ -198,7 +204,7 @@
       <LanguageStandard>stdcpp17</LanguageStandard>
     </ClCompile>
     <Link>
-      <AdditionalDependencies>ws2_32.lib;kernel32.lib;user32.lib;gdi32.lib;winspool.lib;Winmm.lib;Version.lib;Shlwapi.lib;$(Configuration)\EncryptDecrypt.lib;crypt32.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalDependencies>ws2_32.lib;kernel32.lib;user32.lib;gdi32.lib;winspool.lib;Winmm.lib;Version.lib;Shlwapi.lib;$(Configuration)\EncryptDecrypt.lib;crypt32.lib;winhttp.lib;bcrypt.lib;%(AdditionalDependencies)</AdditionalDependencies>
       <OutputFile>release\Ditto.exe</OutputFile>
       <SuppressStartupBanner>true</SuppressStartupBanner>
       <AdditionalLibraryDirectories>%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
@@ -258,8 +264,8 @@
       <LanguageStandard>stdcpp17</LanguageStandard>
     </ClCompile>
     <Link>
-      <AdditionalDependencies>ws2_32.lib;kernel32.lib;user32.lib;gdi32.lib;winspool.lib;Winmm.lib;Version.lib;$(Configuration)64\EncryptDecrypt.lib;Shlwapi.lib;%(AdditionalDependencies)</AdditionalDependencies>
-      <OutputFile>release64\Ditto.exe</OutputFile>
+      <AdditionalDependencies>ws2_32.lib;kernel32.lib;user32.lib;gdi32.lib;winspool.lib;Winmm.lib;Version.lib;$(Configuration)64\EncryptDecrypt.lib;Shlwapi.lib;winhttp.lib;bcrypt.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <OutputFile>release64\$(DittoXTargetName).exe</OutputFile>
       <SuppressStartupBanner>true</SuppressStartupBanner>
       <AdditionalLibraryDirectories>%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
       <GenerateDebugInformation>true</GenerateDebugInformation>
@@ -316,7 +322,7 @@
       <LanguageStandard>stdcpp17</LanguageStandard>
     </ClCompile>
     <Link>
-      <AdditionalDependencies>ws2_32.lib;kernel32.lib;user32.lib;gdi32.lib;winspool.lib;Winmm.lib;Version.lib;$(Platform)\$(Configuration)\EncryptDecrypt.lib;Shlwapi.lib;zlib\zlibstat.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalDependencies>ws2_32.lib;kernel32.lib;user32.lib;gdi32.lib;winspool.lib;Winmm.lib;Version.lib;$(Platform)\$(Configuration)\EncryptDecrypt.lib;Shlwapi.lib;zlib\zlibstat.lib;winhttp.lib;bcrypt.lib;%(AdditionalDependencies)</AdditionalDependencies>
       <OutputFile>$(Platform)\$(Configuration)\Ditto.exe</OutputFile>
       <SuppressStartupBanner>true</SuppressStartupBanner>
       <AdditionalLibraryDirectories>%(AdditionalLibraryDirectories)</AdditionalLibraryDirectories>
@@ -372,7 +378,7 @@
       <LanguageStandard>stdcpp17</LanguageStandard>
     </ClCompile>
     <Link>
-      <AdditionalDependencies>ws2_32.lib;kernel32.lib;user32.lib;gdi32.lib;winspool.lib;Winmm.lib;Pdh.lib;Version.lib;$(Configuration)\EncryptDecrypt.lib;Shlwapi.lib;crypt32.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalDependencies>ws2_32.lib;kernel32.lib;user32.lib;gdi32.lib;winspool.lib;Winmm.lib;Pdh.lib;Version.lib;$(Configuration)\EncryptDecrypt.lib;Shlwapi.lib;crypt32.lib;winhttp.lib;bcrypt.lib;%(AdditionalDependencies)</AdditionalDependencies>
       <OutputFile>debug\Ditto.exe</OutputFile>
       <SuppressStartupBanner>true</SuppressStartupBanner>
       <GenerateDebugInformation>true</GenerateDebugInformation>
@@ -431,7 +437,7 @@
       <LanguageStandard>stdcpp17</LanguageStandard>
     </ClCompile>
     <Link>
-      <AdditionalDependencies>ws2_32.lib;kernel32.lib;user32.lib;gdi32.lib;winspool.lib;Winmm.lib;Pdh.lib;Version.lib;$(Configuration)64\\EncryptDecrypt.lib;Shlwapi.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalDependencies>ws2_32.lib;kernel32.lib;user32.lib;gdi32.lib;winspool.lib;Winmm.lib;Pdh.lib;Version.lib;$(Configuration)64\\EncryptDecrypt.lib;Shlwapi.lib;winhttp.lib;bcrypt.lib;%(AdditionalDependencies)</AdditionalDependencies>
       <OutputFile>debug64\Ditto.exe</OutputFile>
       <SuppressStartupBanner>true</SuppressStartupBanner>
       <GenerateDebugInformation>true</GenerateDebugInformation>
@@ -489,7 +495,7 @@
       <LanguageStandard>stdcpp17</LanguageStandard>
     </ClCompile>
     <Link>
-      <AdditionalDependencies>ws2_32.lib;kernel32.lib;user32.lib;gdi32.lib;winspool.lib;Winmm.lib;Pdh.lib;Version.lib;$(Platform)\$(Configuration)\EncryptDecrypt.lib;Shlwapi.lib;zlib\zlibstat.lib;%(AdditionalDependencies)</AdditionalDependencies>
+      <AdditionalDependencies>ws2_32.lib;kernel32.lib;user32.lib;gdi32.lib;winspool.lib;Winmm.lib;Pdh.lib;Version.lib;$(Platform)\$(Configuration)\EncryptDecrypt.lib;Shlwapi.lib;zlib\zlibstat.lib;winhttp.lib;bcrypt.lib;%(AdditionalDependencies)</AdditionalDependencies>
       <OutputFile>$(Platform)\$(Configuration)\Ditto.exe</OutputFile>
       <SuppressStartupBanner>true</SuppressStartupBanner>
       <GenerateDebugInformation>true</GenerateDebugInformation>
@@ -566,6 +572,9 @@
     <ClCompile Include="src\DittoDropTarget.cpp" />
     <ClCompile Include="src\DittoPopupWindow.cpp" />
     <ClCompile Include="src\DittoRulerRichEditCtrl.cpp" />
+    <ClCompile Include="src\DittoXCredentialStore.cpp" />
+    <ClCompile Include="src\DittoXPublicLinkCache.cpp" />
+    <ClCompile Include="src\DittoXShareClient.cpp" />
     <ClCompile Include="src\DittoWindow.cpp" />
     <ClCompile Include="src\DPI.cpp" />
     <ClCompile Include="src\DrawHTML.C">
@@ -836,6 +845,9 @@
     <ClInclude Include="src\DittoDropTarget.h" />
     <ClInclude Include="src\DittoPopupWindow.h" />
     <ClInclude Include="src\DittoRulerRichEditCtrl.h" />
+    <ClInclude Include="src\DittoXCredentialStore.h" />
+    <ClInclude Include="src\DittoXPublicLinkCache.h" />
+    <ClInclude Include="src\DittoXShareClient.h" />
     <ClInclude Include="src\DittoWindow.h" />
     <ClInclude Include="src\DPI.h" />
     <ClInclude Include="src\DrawHTML.h" />

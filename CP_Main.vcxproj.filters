@@ -1,4 +1,4 @@
-﻿<?xml version="1.0" encoding="utf-8"?>
+<?xml version="1.0" encoding="utf-8"?>
 <Project ToolsVersion="4.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
   <ItemGroup>
     <ClCompile Include="src\About.cpp">
@@ -482,6 +482,15 @@
       <Filter>src\RulerRichEditCtrl\External</Filter>
     </ClCompile>
     <ClCompile Include="src\DittoRulerRichEditCtrl.cpp">
+      <Filter>src</Filter>
+    </ClCompile>
+    <ClCompile Include="src\DittoXCredentialStore.cpp">
+      <Filter>src</Filter>
+    </ClCompile>
+    <ClCompile Include="src\DittoXPublicLinkCache.cpp">
+      <Filter>src</Filter>
+    </ClCompile>
+    <ClCompile Include="src\DittoXShareClient.cpp">
       <Filter>src</Filter>
     </ClCompile>
     <ClCompile Include="src\EditFrameWnd.cpp">
@@ -999,6 +1008,15 @@
       <Filter>src\RulerRichEditCtrl\External</Filter>
     </ClInclude>
     <ClInclude Include="src\DittoRulerRichEditCtrl.h">
+      <Filter>src</Filter>
+    </ClInclude>
+    <ClInclude Include="src\DittoXCredentialStore.h">
+      <Filter>src</Filter>
+    </ClInclude>
+    <ClInclude Include="src\DittoXPublicLinkCache.h">
+      <Filter>src</Filter>
+    </ClInclude>
+    <ClInclude Include="src\DittoXShareClient.h">
       <Filter>src</Filter>
     </ClInclude>
     <ClInclude Include="src\EditFrameWnd.h">

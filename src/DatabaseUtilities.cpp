@@ -376,6 +376,27 @@ BOOL ValidDB(CString csPath, BOOL bUpgrade)
 			e.errorCode();
 		}
 
+		// Ditto-X public link cache (SPEC-2026-11-05): bảng additive, không rewrite clip data.
+		try
+		{
+			db.execDML(_T("CREATE TABLE IF NOT EXISTS DittoXPublicLinks(")
+				_T("id INTEGER PRIMARY KEY AUTOINCREMENT, ")
+				_T("content_hash TEXT NOT NULL, ")
+				_T("manifest_hash TEXT NOT NULL UNIQUE, ")
+				_T("idempotency_key TEXT NOT NULL, ")
+				_T("session_id TEXT, ")
+				_T("state TEXT NOT NULL, ")
+				_T("viewer_url TEXT, ")
+				_T("expires_at TEXT, ")
+				_T("created_at TEXT NOT NULL, ")
+				_T("last_used_at TEXT NOT NULL);"));
+			db.execDML(_T("CREATE INDEX IF NOT EXISTS DittoXPublicLinks_State ON DittoXPublicLinks(state, manifest_hash);"));
+		}
+		catch (CppSQLite3Exception& e)
+		{
+			e.errorCode();
+		}
+
 		try
 		{
 			db.execQuery(_T("SELECT clipOrder, clipGroupOrder FROM Main"));
@@ -754,6 +775,20 @@ BOOL CreateDB(CString csFile)
 			_T("DELETE FROM CopyBuffers WHERE lClipID = old.clipID;\n")
 			_T("DELETE FROM Data WHERE lParentID = old.clipID;\n")
 			_T("END\n"));
+
+		// Ditto-X public link cache (SPEC-2026-11-05) — tạo sẵn cho DB mới.
+		db.execDML(_T("CREATE TABLE DittoXPublicLinks(")
+			_T("id INTEGER PRIMARY KEY AUTOINCREMENT, ")
+			_T("content_hash TEXT NOT NULL, ")
+			_T("manifest_hash TEXT NOT NULL UNIQUE, ")
+			_T("idempotency_key TEXT NOT NULL, ")
+			_T("session_id TEXT, ")
+			_T("state TEXT NOT NULL, ")
+			_T("viewer_url TEXT, ")
+			_T("expires_at TEXT, ")
+			_T("created_at TEXT NOT NULL, ")
+			_T("last_used_at TEXT NOT NULL);"));
+		db.execDML(_T("CREATE INDEX DittoXPublicLinks_State ON DittoXPublicLinks(state, manifest_hash);"));
 
 		db.execDML(_T("CREATE INDEX Data_ParentId_Format ON Data(lParentID COLLATE BINARY ASC, strClipBoardFormat COLLATE NOCASE ASC);"));
 
