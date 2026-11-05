@@ -15,6 +15,7 @@
 #include "DimWnd.h"
 #include "DittoXShareClient.h"
 #include <memory>
+#include <mutex>
 #include "FormatSQL.h"
 #include "FriendPromptDlg.h"
 #include "GroupName.h"
@@ -62,6 +63,7 @@ static char THIS_FILE[] = __FILE__;
 #define TIMER_ERROR_MSG			4
 #define TIMER_DRAG_HIDE_WINDOW	6
 #define TIMER_QUICK_EXPORT_STATUS	8
+#define TIMER_DITTOX_PUBLISH_POLL	9
 #define TIMER_DO_ACTION	7
 
 #define THREAD_DO_QUERY				0
@@ -200,7 +202,6 @@ BEGIN_MESSAGE_MAP(CQPasteWnd, CWndEx)
 	ON_NOTIFY(NM_GETTOOLTIPTEXT, ID_LIST_HEADER, OnGetToolTipText)
 	ON_MESSAGE(NM_SELECT_DB_ID, OnListSelect_DB_ID)
 	ON_MESSAGE(WM_REFRESH_VIEW, OnRefreshView)
-	ON_MESSAGE(WM_DITTOX_PUBLISH_DONE, OnDittoXPublishDone)
 	ON_MESSAGE(WM_RELOAD_CLIP_IN_UI, OnReloadClipInUI)
 	ON_WM_NCLBUTTONDBLCLK()
 	ON_WM_WINDOWPOSCHANGING()
@@ -3312,6 +3313,13 @@ bool CQPasteWnd::CheckActions(MSG* pMsg)
 	{
 		if (m_actions.OnMsg(pMsg, a))
 		{
+			// Ditto-X publish chỉ thuộc list. Để search editor giữ Ctrl+Z/native Undo,
+			// shortcut action được chuyển tiếp nếu focus không nằm trên list control.
+			if (a.Cmd == ActionEnums::DITTOX_PUBLISH_CLIP &&
+				::GetFocus() != m_lstHeader.GetSafeHwnd())
+			{
+				return false;
+			}
 			KillTimer(TIMER_DO_ACTION);
 			ret = DoAction(a);
 		}
@@ -5985,25 +5993,30 @@ void CQPasteWnd::ShowQuickExportFeedback(const CString& copiedPath)
 
 // --- Ditto-X Ctrl+Z publish (SPEC-2026-11-05) ---
 
-// Context cho worker thread: payload copy sang thread; UI thread không đụng DB trong lúc đó.
+// Completion object sống qua window teardown: worker giữ shared_ptr, UI giữ shared_ptr.
+// Timer UI poll state; không nhét raw heap pointer vào PostMessage (message có thể bị drop
+// khi HWND đóng, làm leak completion hoặc để m_dittoxPublishing treo).
+struct DittoXPublishCompletion
+{
+	std::mutex mutex;
+	bool done = false;
+	DittoXPublishOutcome outcome;
+};
+
 struct DittoXPublishJob
 {
-	HWND ownerWnd;
+	std::shared_ptr<DittoXPublishCompletion> completion;
 	DittoXClipPayload payload;
 };
 
 static UINT DittoXPublishThreadProc(LPVOID param)
 {
 	std::unique_ptr<DittoXPublishJob> job(static_cast<DittoXPublishJob*>(param));
-	DittoXPublishOutcome* outcome = new DittoXPublishOutcome();
-	*outcome = DittoXPublish(job->payload);
-	if (job->ownerWnd != NULL && ::IsWindow(job->ownerWnd))
+	DittoXPublishOutcome outcome = DittoXPublish(job->payload);
 	{
-		::PostMessage(job->ownerWnd, WM_DITTOX_PUBLISH_DONE, reinterpret_cast<WPARAM>(outcome), 0);
-	}
-	else
-	{
-		delete outcome; // cửa sổ đã đóng — không leak
+		std::lock_guard<std::mutex> lock(job->completion->mutex);
+		job->completion->outcome = outcome;
+		job->completion->done = true;
 	}
 	return 0;
 }
@@ -6043,49 +6056,59 @@ bool CQPasteWnd::DoDittoXPublishClip()
 		return true;
 	}
 
-	// Upload chạy nền (WinHTTP ngoài UI thread); kết quả về qua WM_DITTOX_PUBLISH_DONE.
+	// Upload chạy nền (WinHTTP ngoài UI thread); UI poll completion bằng timer.
+	std::shared_ptr<DittoXPublishCompletion> completion = std::make_shared<DittoXPublishCompletion>();
 	std::unique_ptr<DittoXPublishJob> job(new DittoXPublishJob());
-	job->ownerWnd = GetSafeHwnd();
+	job->completion = completion;
 	job->payload = payload;
 	DittoXPublishJob* rawJob = job.release();
+	m_dittoxCompletion = completion;
+	m_dittoxPublishing = true;
+	if (SetTimer(TIMER_DITTOX_PUBLISH_POLL, 100, NULL) == 0)
+	{
+		delete rawJob;
+		m_dittoxCompletion.reset();
+		m_dittoxPublishing = false;
+		ShowQuickExportFeedback(_T("Không tạo được timer theo dõi upload"));
+		return true;
+	}
 	CWinThread* thread = AfxBeginThread(DittoXPublishThreadProc, rawJob);
 	if (thread == NULL)
 	{
+		KillTimer(TIMER_DITTOX_PUBLISH_POLL);
 		delete rawJob;
+		m_dittoxCompletion.reset();
+		m_dittoxPublishing = false;
 		ShowQuickExportFeedback(_T("Không khởi động được upload"));
 		return true;
 	}
 
-	m_dittoxPublishing = true;
 	ShowQuickExportFeedback(_T("Đang tạo link public..."));
 	return true;
 }
 
-LRESULT CQPasteWnd::OnDittoXPublishDone(WPARAM wParam, LPARAM lParam)
+void CQPasteWnd::HandleDittoXPublishDone(const DittoXPublishOutcome& outcome)
 {
 	m_dittoxPublishing = false;
 
-	std::unique_ptr<DittoXPublishOutcome> outcome(reinterpret_cast<DittoXPublishOutcome*>(wParam));
-	if (!outcome)
-	{
-		return 0;
-	}
-
-	switch (outcome->status)
+	switch (outcome.status)
 	{
 	case DittoXPublishStatus::Success:
 	case DittoXPublishStatus::ReusedLink:
 	{
 		// Copy URL vào clipboard TRÊN UI THREAD: snapshot trước, lỗi → restore + verify.
-		DittoXClipboardCommitResult commit = DittoXCommitUrlToClipboard(outcome->fullUrl);
+		DittoXClipboardCommitResult commit = DittoXCommitUrlToClipboard(outcome.fullUrl);
 		switch (commit)
 		{
 		case DittoXClipboardCommitResult::Committed:
 			// Chỉ báo đã copy sau khi URL thật sự nằm trong clipboard.
-			ShowQuickExportFeedback(outcome->fullUrl);
+			ShowQuickExportFeedback(outcome.fullUrl);
 			break;
 		case DittoXClipboardCommitResult::SnapshotFailed:
 			ShowQuickExportFeedback(_T("Không đọc được clipboard hiện tại — bỏ copy link để giữ nguyên nội dung cũ"));
+			break;
+		case DittoXClipboardCommitResult::PreparationFailed:
+			ShowQuickExportFeedback(_T("Không chuẩn bị được dữ liệu clipboard — clipboard cũ vẫn nguyên"));
 			break;
 		case DittoXClipboardCommitResult::CommitFailed:
 			ShowQuickExportFeedback(_T("Copy link lỗi — đã khôi phục clipboard cũ"));
@@ -6105,10 +6128,9 @@ LRESULT CQPasteWnd::OnDittoXPublishDone(WPARAM wParam, LPARAM lParam)
 	case DittoXPublishStatus::InvalidResponse:
 	case DittoXPublishStatus::FinalizeUnconfirmed:
 	case DittoXPublishStatus::PendingReplayFailed:
-		ShowQuickExportFeedback(outcome->detail.IsEmpty() ? CString(_T("Publish lỗi")) : outcome->detail);
+		ShowQuickExportFeedback(outcome.detail.IsEmpty() ? CString(_T("Publish lỗi")) : outcome.detail);
 		break;
 	}
-	return 0;
 }
 
 LRESULT CQPasteWnd::OnCancelFilter(WPARAM wParam, LPARAM lParam)
@@ -7118,6 +7140,30 @@ void CQPasteWnd::OnTimer(UINT_PTR nIDEvent)
 	{
 		KillTimer(TIMER_QUICK_EXPORT_STATUS);
 		m_search.ClearTransientStatus();
+	}
+	else if (nIDEvent == TIMER_DITTOX_PUBLISH_POLL)
+	{
+		std::shared_ptr<DittoXPublishCompletion> completion = m_dittoxCompletion;
+		if (!completion)
+		{
+			KillTimer(TIMER_DITTOX_PUBLISH_POLL);
+		}
+		else
+		{
+			bool done = false;
+			DittoXPublishOutcome outcome;
+			{
+				std::lock_guard<std::mutex> lock(completion->mutex);
+				done = completion->done;
+				if (done) outcome = completion->outcome;
+			}
+			if (done)
+			{
+				KillTimer(TIMER_DITTOX_PUBLISH_POLL);
+				m_dittoxCompletion.reset();
+				HandleDittoXPublishDone(outcome);
+			}
+		}
 	}
 	else if (nIDEvent == TIMER_ERROR_MSG)
 	{

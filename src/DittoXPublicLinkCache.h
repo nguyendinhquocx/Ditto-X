@@ -35,7 +35,7 @@ public:
 		CStringW& sessionIdOut, CStringW& idempotencyKeyOut);
 
 	// Ghi pending record (xoá pending cũ cùng manifest hash trước khi ghi).
-	static void SavePending(CppSQLite3DB& db, const CStringW& manifestHash, const CStringW& contentHash,
+	static bool SavePending(CppSQLite3DB& db, const CStringW& manifestHash, const CStringW& contentHash,
 		const CStringW& idempotencyKey, const CStringW& sessionId, const CStringW& nowIso);
 
 	// Chuyển pending → published (lưu viewerUrl relative + expiresAt ISO từ server).

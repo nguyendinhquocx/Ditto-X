@@ -74,7 +74,8 @@ struct DittoXPublishOutcome
 enum class DittoXClipboardCommitResult
 {
 	Committed,		// URL đã nằm trong clipboard (verify xong)
-	SnapshotFailed,	// không snapshot được clipboard → KHÔNG đụng clipboard hiện tại
+	SnapshotFailed,	// không snapshot/mở được clipboard → không chủ động đổi dữ liệu
+	PreparationFailed,	// cấp phát URL/marker lỗi trước EmptyClipboard → clipboard vẫn cũ
 	CommitFailed,	// set URL lỗi sau EmptyClipboard → đã restore snapshot thành công
 	RestoreFailed	// restore sau lỗi cũng fail — clipboard có thể không còn nguyên
 };
@@ -95,7 +96,7 @@ void DittoXSetClipboardFaultInjection(DittoXClipboardFaultMode mode);
 CStringW DittoXSha256Hex(const BYTE* data, size_t length);
 CStringW DittoXSha256Hex(const std::vector<BYTE>& bytes);
 
-// ISO 8601 UTC hiện tại ("YYYY-MM-DDTHH:MM:SSZ").
+// ISO 8601 UTC hiện tại, millisecond fixed-width ("YYYY-MM-DDTHH:MM:SS.mmmZ").
 CStringW DittoXUtcNowIso();
 // Epoch milliseconds hiện tại.
 long long DittoXUtcNowEpochMs();
@@ -103,7 +104,7 @@ long long DittoXUtcNowEpochMs();
 long long DittoXSystemTimeToEpochMs(const SYSTEMTIME& st);
 // Parse ISO 8601 UTC ("...T...Z", millis optional) sang epoch ms; trả LLONG_MIN khi sai.
 long long DittoXIsoToEpochMs(const CStringW& iso);
-// Epoch ms → ISO 8601 UTC "YYYY-MM-DDTHH:MM:SSZ" (cache dùng để tính mốc pending stale).
+// Epoch ms → ISO 8601 UTC "YYYY-MM-DDTHH:MM:SS.mmmZ" (cache expiry/prune).
 CStringW DittoXEpochMsToIso(long long epochMs);
 
 // Fingerprint toàn gói: version tag + NUL + article.md bytes + từng asset

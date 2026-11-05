@@ -136,7 +136,13 @@ int CDittoRulerRichEditCtrl::SaveToDB(BOOL bUpdateDesc, bool bDirectSaveNewClip)
 		return DIDNT_NEED_TO_SAVE;
 	}
 
-	bool bSetModifyToFalse = true;
+	// Clip mới đi theo Ctrl+Q phải giữ trạng thái modified nếu bất kỳ bước save nào lỗi.
+	bool bDirectNewClip = bDirectSaveNewClip && m_lID < 0;
+	bool bSetModifyToFalse = !bDirectNewClip;
+	bool transactionOpen = false;
+	bool directSavePendingCommit = false;
+	long directSavedId = -1;
+	CString directSavedDescription;
 	try
 	{
 		//only save the types if they have them set as save types, mainly rtf type
@@ -172,10 +178,36 @@ int CDittoRulerRichEditCtrl::SaveToDB(BOOL bUpdateDesc, bool bDirectSaveNewClip)
 
 		if(Clip.m_Formats.GetSize() <= 0)
 		{
-			return FALSE;
+			// Ctrl+Q trên clip mới không có format lưu được = draft rỗng, bỏ êm.
+			return bDirectSaveNewClip && m_lID < 0 ? DIDNT_NEED_TO_SAVE : FALSE;
 		}
 
+		if (bDirectSaveNewClip && m_lID < 0)
+		{
+			// RichEdit có thể serialize RTF cho cả vùng chỉ chứa whitespace. Không coi
+			// RTF formatting rỗng là payload; chỉ giữ khi plaintext có chữ hoặc RTF
+			// thực sự nhúng ảnh/object (ví dụ paste ảnh vào editor).
+			// Đọc text trực tiếp từ editor để không bỏ nội dung khi profile chỉ lưu RTF.
+			CString directText = GetText();
+			if (directText.Trim().IsEmpty())
+			{
+				CStringA rtf = Clip.GetRTFTextFormat();
+				rtf.MakeLower();
+				bool hasEmbeddedPayload =
+					rtf.Find("\\pict") >= 0 ||
+					rtf.Find("\\shppict") >= 0 ||
+					rtf.Find("\\object") >= 0;
+				bool hasImageFormat = Clip.ContainsClipFormat(CF_DIB) || Clip.ContainsClipFormat(theApp.m_PNG_Format);
+				if (!hasEmbeddedPayload && !hasImageFormat)
+				{
+					return DIDNT_NEED_TO_SAVE;
+				}
+			}
+		}
+
+		// Empty-draft decision happens before BEGIN so return paths cannot strand a transaction.
 		theApp.m_db.execDML(_T("begin transaction;"));
+		transactionOpen = true;
 
 		if(m_lID >= 0)
 		{
@@ -184,33 +216,22 @@ int CDittoRulerRichEditCtrl::SaveToDB(BOOL bUpdateDesc, bool bDirectSaveNewClip)
 		else if(bDirectSaveNewClip)
 		{
 			// Ctrl+Q trên clip mới (SPEC-2026-11-05): lưu thẳng metadata mặc định,
-			// KHÔNG mở hộp Properties. DB fail vẫn quăng exception → caller giữ draft.
+			// KHÔNG mở hộp Properties. DB fail → rollback và caller giữ draft.
 			bSetModifyToFalse = false;
 
-			if (Clip.m_Formats.GetSize() <= 0)
+			Clip.MakeLatestOrder();
+			if (!Clip.AddToDB())
 			{
-				// Không có format nào lưu được → coi như không có gì để lưu (đóng êm).
-				return DIDNT_NEED_TO_SAVE;
+				// AddToDB có thể trả false mà không throw. Rollback mọi partial INSERT
+				// (Main + Data) và giữ editor/draft để user retry.
+				theApp.m_db.execDML(_T("rollback;"));
+				transactionOpen = false;
+				return FALSE;
 			}
-
-			// Draft rỗng/whitespace-only thì bỏ, không tạo DB row. Plaintext trống nhưng
-			// vẫn có RTF/ảnh nhúng thì vẫn lưu (không phân loại rỗng chỉ vì plaintext trống).
-			CString directText = Clip.GetUnicodeTextFormat();
-			if (directText.Trim().IsEmpty())
-			{
-				bool hasRtf = Clip.ContainsClipFormat(theApp.m_RTFFormat);
-				bool hasImage = Clip.ContainsClipFormat(CF_DIB) || Clip.ContainsClipFormat(theApp.m_PNG_Format);
-				if (!hasRtf && !hasImage)
-				{
-					return DIDNT_NEED_TO_SAVE;
-				}
-			}
-
-			Clip.AddToDB();
-			m_csDescription = Clip.m_Desc;
-			m_lID = Clip.m_id;
+			directSavedDescription = Clip.m_Desc;
+			directSavedId = Clip.m_id;
+			directSavePendingCommit = true;
 			bUpdateDesc = TRUE;
-			bSetModifyToFalse = true;
 		}
 		else
 		{
@@ -232,11 +253,32 @@ int CDittoRulerRichEditCtrl::SaveToDB(BOOL bUpdateDesc, bool bDirectSaveNewClip)
 		nRet = SAVED_CLIP_TO_DB;
 
 		theApp.m_db.execDML(_T("commit transaction;"));
+		transactionOpen = false;
+		if (directSavePendingCommit)
+		{
+			// Chỉ gán DB ID / đánh dấu editor sạch sau commit thành công.
+			m_lID = directSavedId;
+			m_csDescription = directSavedDescription;
+			bSetModifyToFalse = true;
+		}
 
 		if(bUpdateDesc)
 			theApp.RefreshView();
 	}
-	CATCH_SQLITE_EXCEPTION
+	catch (CppSQLite3Exception& e)
+	{
+		nRet = FALSE;
+		Log(StrF(_T("SQLITE Exception %d - %s"), e.errorCode(), e.errorMessage()));
+		if (transactionOpen)
+		{
+			try { theApp.m_db.execDML(_T("rollback;")); }
+			catch (CppSQLite3Exception& rollbackError)
+			{
+				Log(StrF(_T("SQLITE rollback exception %d - %s"), rollbackError.errorCode(), rollbackError.errorMessage()));
+			}
+		}
+		ASSERT(FALSE);
+	}
 
 	if(bSetModifyToFalse)
 		m_rtf.SetModify(FALSE);

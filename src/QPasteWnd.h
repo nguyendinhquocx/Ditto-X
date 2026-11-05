@@ -10,6 +10,7 @@
 #include <vector>
 #include <list>
 #include <map>
+#include <memory>
 #include <afxmt.h>
 #include "ClipFormatQListCtrl.h"
 #include "QPasteWndThread.h"
@@ -21,6 +22,9 @@
 #include "Popup.h"
 #include "CustomFriendsHelper.h"
 #include "ModernScrollBar.h"
+
+struct DittoXPublishCompletion;
+struct DittoXPublishOutcome;
 
 class CMainTable
 {
@@ -181,6 +185,7 @@ public:
 	bool m_pendingRefresh;
 	DWORD m_lastNonActiveMouseMove;
 	bool m_dittoxPublishing;	// Ctrl+Z upload đang chạy — hotkey lặp bị bỏ qua
+	std::shared_ptr<DittoXPublishCompletion> m_dittoxCompletion;
 
     void RefreshNc();
     void UpdateStatus(bool bRepaintImmediately = false); // regenerates the status (caption) text
@@ -283,7 +288,7 @@ public:
 	bool DoExportToTempAndCopyPath();
 	void ShowQuickExportFeedback(const CString& copiedPath);
 	bool DoDittoXPublishClip();
-	LRESULT OnDittoXPublishDone(WPARAM wParam, LPARAM lParam);
+	void HandleDittoXPublishDone(const DittoXPublishOutcome& outcome);
 	bool DoSaveCurrentClipboard();
 	bool DoMoveClipDown();
 	bool DoMoveClipUp();

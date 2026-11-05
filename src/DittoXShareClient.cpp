@@ -345,6 +345,12 @@ namespace
 		request.h = WinHttpOpenRequest(connect.h, L"POST", path, NULL, WINHTTP_NO_REFERER,
 			WINHTTP_DEFAULT_ACCEPT_TYPES, WINHTTP_FLAG_SECURE);
 		if (!request.h) return result;
+		DWORD disableRedirects = WINHTTP_DISABLE_REDIRECTS;
+		if (!WinHttpSetOption(request.h, WINHTTP_OPTION_DISABLE_FEATURE, &disableRedirects, sizeof(disableRedirects)))
+		{
+			LogClient(L"không vô hiệu được redirect cho API request — abort để không lộ credential");
+			return result;
+		}
 
 		CStringW authHeader;
 		if (!bearerKey.IsEmpty())
@@ -441,6 +447,12 @@ namespace
 		request.h = WinHttpOpenRequest(connect.h, L"PUT", pathAndQuery, NULL, WINHTTP_NO_REFERER,
 			WINHTTP_DEFAULT_ACCEPT_TYPES, WINHTTP_FLAG_SECURE);
 		if (!request.h) return false;
+		DWORD disableRedirects = WINHTTP_DISABLE_REDIRECTS;
+		if (!WinHttpSetOption(request.h, WINHTTP_OPTION_DISABLE_FEATURE, &disableRedirects, sizeof(disableRedirects)))
+		{
+			LogClient(L"không vô hiệu được redirect cho presigned PUT — abort để không lộ URL ký");
+			return false;
+		}
 
 		CStringW contentTypeHeader = L"Content-Type: " + Utf8ToWide(contentType);
 		if (!WinHttpAddRequestHeaders(request.h, contentTypeHeader.GetString(),
@@ -565,14 +577,21 @@ namespace
 		if (viewerUrl.Left(6) != L"/clip/") return false;
 		CStringW token = viewerUrl.Mid(6);
 		if (token.IsEmpty()) return false;
+		if (token.GetLength() > 128) return false;
 		for (int i = 0; i < token.GetLength(); i++)
 		{
 			wchar_t ch = token[i];
 			bool ok = (ch >= 'A' && ch <= 'Z') || (ch >= 'a' && ch <= 'z') || (ch >= '0' && ch <= '9') ||
-				ch == '-' || ch == '.' || ch == '_' || ch == '~' || ch == '%';
+				ch == '-' || ch == '_'; // server token is base64url; reject path/query/dot tricks
 			if (!ok) return false;
 		}
 		return true;
+	}
+
+	bool IsValidFutureExpiry(const CStringW& expiresAt)
+	{
+		const long long expiryMs = DittoXIsoToEpochMs(expiresAt);
+		return expiryMs != LLONG_MIN && expiryMs > DittoXUtcNowEpochMs();
 	}
 
 	// --- Publish state machine ---
@@ -671,23 +690,34 @@ namespace
 		return nullptr;
 	}
 
-	bool PutAllObjects(const PublishContext& ctx, SessionResponse& session)
+	enum class PutPackageResult { Ok, Failed, SessionCommitted };
+
+	PutPackageResult PutAllObjects(const PublishContext& ctx, SessionResponse& session)
 	{
+		bool didReissue = false; // one presigned-session reissue total per package
 		PutResult markdownPut = PutObject(session.markdownPresignedUrl, ctx.markdownBytes, "text/markdown");
 		if (markdownPut == PutResult::Reissue)
 		{
-			// Presigned URL hết hạn — reissue CÙNG key/manifest (idempotent), PUT lại.
+			// Presigned URL hết hạn — reissue CÙNG key/manifest đúng một lần cho toàn package.
+			didReissue = true;
 			LogClient(L"presigned markdown hết hạn — reissue session");
 			SessionResponse fresh;
-			if (!CreateSession(ctx, fresh) || fresh.sessionId != session.sessionId)
+			if (!CreateSession(ctx, fresh))
+			{
+				if (fresh.error.CompareNoCase("session_committed") == 0)
+					return PutPackageResult::SessionCommitted;
+				LogClient(L"reissue session lỗi — bỏ");
+				return PutPackageResult::Failed;
+			}
+			if (fresh.sessionId != session.sessionId)
 			{
 				LogClient(L"reissue trả session khác — bỏ");
-				return false;
+				return PutPackageResult::Failed;
 			}
 			session = fresh;
 			markdownPut = PutObject(session.markdownPresignedUrl, ctx.markdownBytes, "text/markdown");
 		}
-		if (markdownPut != PutResult::Ok) return false;
+		if (markdownPut != PutResult::Ok) return PutPackageResult::Failed;
 
 		for (const DittoXClipAsset& asset : ctx.payload->assets)
 		{
@@ -696,24 +726,29 @@ namespace
 			if (!remote)
 			{
 				LogClient(L"session thiếu presigned URL cho asset");
-				return false;
+				return PutPackageResult::Failed;
 			}
 			PutResult put = PutObject(remote->presignedUrl, asset.bytes, asset.contentType);
 			if (put == PutResult::Reissue)
 			{
+				if (didReissue) return PutPackageResult::Failed;
+				didReissue = true;
 				SessionResponse fresh;
-				if (!CreateSession(ctx, fresh) || fresh.sessionId != session.sessionId)
+				if (!CreateSession(ctx, fresh))
 				{
-					return false;
+					if (fresh.error.CompareNoCase("session_committed") == 0)
+						return PutPackageResult::SessionCommitted;
+					return PutPackageResult::Failed;
 				}
+				if (fresh.sessionId != session.sessionId) return PutPackageResult::Failed;
 				session = fresh;
 				remote = FindAssetUrl(session, canonicalUtf8);
-				if (!remote) return false;
+				if (!remote) return PutPackageResult::Failed;
 				put = PutObject(remote->presignedUrl, asset.bytes, asset.contentType);
 			}
-			if (put != PutResult::Ok) return false;
+			if (put != PutResult::Ok) return PutPackageResult::Failed;
 		}
-		return true;
+		return PutPackageResult::Ok;
 	}
 
 	// POST finalize, tối đa 3 lần; in_progress chờ 1.5s đúng 1 lần.
@@ -751,7 +786,7 @@ namespace
 	{
 		DittoXPublishOutcome outcome;
 		FinalizeResponse finalize = FinalizeWithRetry(ctx, sessionId);
-		if (finalize.ok && IsValidClipViewerPath(finalize.viewerUrl) && !finalize.expiresAt.IsEmpty())
+		if (finalize.ok && IsValidClipViewerPath(finalize.viewerUrl) && IsValidFutureExpiry(finalize.expiresAt))
 		{
 			CDittoXPublicLinkCache::MarkPublished(db, ctx.idempotencyKey,
 				finalize.viewerUrl, finalize.expiresAt, DittoXUtcNowIso());
@@ -762,6 +797,7 @@ namespace
 			return outcome;
 		}
 		if (!finalize.networkOk || finalize.statusCode >= 500 ||
+			(finalize.statusCode >= 200 && finalize.statusCode < 300) ||
 			finalize.error.CompareNoCase("session_in_progress") == 0)
 		{
 			// Ambiguous: commit có thể đã xảy ra. Giữ pending, không upload mới.
@@ -799,11 +835,80 @@ namespace
 		return false;
 	}
 
-	// Snapshot mọi format hiện có vào local copies. Trả false khi có format nào
-	// không đọc được — khi đó KHÔNG được mutation clipboard (abort trước).
-	bool SnapshotClipboard(CClipFormats& snapshot)
+	// Clipboard formats có các kiểu handle khác nhau. Snapshot chỉ nhận các loại mình
+	// clone/verify được; gặp format không hỗ trợ thì abort TRƯỚC EmptyClipboard.
+	enum class ClipboardSnapshotKind { GlobalMemory, Bitmap, Palette };
+	struct ClipboardSnapshotEntry
 	{
-		snapshot.RemoveAll();
+		UINT format = 0;
+		ClipboardSnapshotKind kind = ClipboardSnapshotKind::GlobalMemory;
+		HGLOBAL global = NULL;
+		HBITMAP bitmap = NULL;
+		HPALETTE palette = NULL;
+		SIZE_T size = 0;
+	};
+
+	bool ClonePalette(HPALETTE source, HPALETTE& cloneOut)
+	{
+		cloneOut = NULL;
+		WORD count = 0;
+		if (!source || ::GetObject(source, sizeof(count), &count) != sizeof(count) || count == 0) return false;
+		std::vector<PALETTEENTRY> entries(count);
+		if (::GetPaletteEntries(source, 0, count, entries.data()) != count) return false;
+		const size_t bytes = sizeof(LOGPALETTE) + (count - 1) * sizeof(PALETTEENTRY);
+		std::vector<BYTE> storage(bytes);
+		LOGPALETTE* logPalette = reinterpret_cast<LOGPALETTE*>(storage.data());
+		logPalette->palVersion = 0x300;
+		logPalette->palNumEntries = count;
+		memcpy(logPalette->palPalEntry, entries.data(), count * sizeof(PALETTEENTRY));
+		cloneOut = ::CreatePalette(logPalette);
+		return cloneOut != NULL;
+	}
+
+	bool SnapshotOneFormat(UINT formatId, HANDLE source, ClipboardSnapshotEntry& entry)
+	{
+		if (!source) return false;
+		entry.format = formatId;
+		if (formatId == CF_BITMAP || formatId == CF_DSPBITMAP)
+		{
+			entry.kind = ClipboardSnapshotKind::Bitmap;
+			entry.bitmap = static_cast<HBITMAP>(::CopyImage(source, IMAGE_BITMAP, 0, 0, LR_CREATEDIBSECTION));
+			if (!entry.bitmap) return false;
+			BITMAP bitmapInfo = {};
+			if (::GetObject(entry.bitmap, sizeof(bitmapInfo), &bitmapInfo) != sizeof(bitmapInfo))
+			{
+				::DeleteObject(entry.bitmap);
+				entry.bitmap = NULL;
+				return false;
+			}
+			return true;
+		}
+		if (formatId == CF_PALETTE)
+		{
+			entry.kind = ClipboardSnapshotKind::Palette;
+			return ClonePalette(static_cast<HPALETTE>(source), entry.palette);
+		}
+		// These formats contain non-global handles. Do not treat them as HGLOBAL.
+		if (formatId == CF_METAFILEPICT || formatId == CF_ENHMETAFILE ||
+			formatId == CF_DSPMETAFILEPICT || formatId == CF_DSPENHMETAFILE)
+		{
+			return false;
+		}
+
+		entry.kind = ClipboardSnapshotKind::GlobalMemory;
+		HGLOBAL sourceGlobal = static_cast<HGLOBAL>(source);
+		entry.size = ::GlobalSize(sourceGlobal);
+		if (entry.size == 0) return false;
+		LPVOID data = ::GlobalLock(sourceGlobal);
+		if (!data) return false;
+		entry.global = NewGlobalP(data, entry.size);
+		::GlobalUnlock(sourceGlobal);
+		return entry.global != NULL;
+	}
+
+	bool SnapshotClipboard(std::vector<ClipboardSnapshotEntry>& snapshot)
+	{
+		snapshot.clear();
 		if (!OpenClipboardWithRetry(theApp.m_MainhWnd))
 		{
 			LogClient(L"không mở được clipboard để snapshot");
@@ -811,140 +916,253 @@ namespace
 		}
 		bool ok = true;
 		UINT format = ::EnumClipboardFormats(0);
-		while (format != 0 && ok)
+		while (format != 0)
 		{
-			HGLOBAL global = ::GetClipboardData(format);
-			SIZE_T size = global ? ::GlobalSize(global) : 0;
-			if (global && size > 0)
+			HANDLE source = ::GetClipboardData(format);
+			ClipboardSnapshotEntry entry;
+			if (!SnapshotOneFormat(format, source, entry))
 			{
-				LPVOID data = ::GlobalLock(global);
-				if (!data)
-				{
-					ok = false;
-					break;
-				}
-				CClipFormat copy;
-				copy.m_cfType = format;
-				copy.m_hgData = NewGlobalP(data, size);
-				::GlobalUnlock(global);
-				if (!copy.m_hgData)
-				{
-					ok = false;
-					break;
-				}
-				snapshot.Add(copy);
+				ok = false;
+				break;
 			}
+			snapshot.push_back(entry);
 			format = ::EnumClipboardFormats(format);
 		}
 		::CloseClipboard();
-		if (!ok) snapshot.RemoveAll();
+		if (!ok)
+		{
+			LogClient(L"clipboard có format không đọc/clone được — không thay clipboard");
+			for (ClipboardSnapshotEntry& entry : snapshot)
+			{
+				if (entry.global) ::GlobalFree(entry.global);
+				if (entry.bitmap) ::DeleteObject(entry.bitmap);
+				if (entry.palette) ::DeleteObject(entry.palette);
+			}
+			snapshot.clear();
+		}
 		return ok;
 	}
 
-	void FreeSnapshot(CClipFormats& snapshot)
+	void FreeSnapshot(std::vector<ClipboardSnapshotEntry>& snapshot)
 	{
-		for (int i = 0; i < snapshot.GetSize(); i++)
+		for (ClipboardSnapshotEntry& entry : snapshot)
 		{
-			if (snapshot[i].m_hgData)
-			{
-				::GlobalFree(snapshot[i].m_hgData);
-				snapshot[i].m_hgData = NULL;
-			}
+			if (entry.global) ::GlobalFree(entry.global);
+			if (entry.bitmap) ::DeleteObject(entry.bitmap);
+			if (entry.palette) ::DeleteObject(entry.palette);
+			entry.global = NULL;
+			entry.bitmap = NULL;
+			entry.palette = NULL;
 		}
+		snapshot.clear();
 	}
 
-	bool VerifyClipboardText(HWND owner, const CStringW& expected)
+	bool ReadBitmapRgb24(HBITMAP bitmap, LONG& widthOut, LONG& heightOut, std::vector<BYTE>& pixelsOut)
 	{
-		if (!::OpenClipboard(owner)) return false;
-		bool ok = false;
+		BITMAP info = {};
+		if (!bitmap || ::GetObject(bitmap, sizeof(info), &info) != sizeof(info)) return false;
+		widthOut = info.bmWidth;
+		heightOut = abs(info.bmHeight);
+		if (widthOut <= 0 || heightOut <= 0) return false;
+		const unsigned long long stride = ((static_cast<unsigned long long>(widthOut) * 24ULL + 31ULL) / 32ULL) * 4ULL;
+		const unsigned long long byteCount = stride * static_cast<unsigned long long>(heightOut);
+		if (byteCount == 0 || byteCount > 512ULL * 1024ULL * 1024ULL) return false;
+
+		BITMAPINFO bitmapInfo = {};
+		bitmapInfo.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+		bitmapInfo.bmiHeader.biWidth = widthOut;
+		bitmapInfo.bmiHeader.biHeight = heightOut; // bottom-up 24-bit DIB, deterministic for both handles
+		bitmapInfo.bmiHeader.biPlanes = 1;
+		bitmapInfo.bmiHeader.biBitCount = 24;
+		bitmapInfo.bmiHeader.biCompression = BI_RGB;
+		pixelsOut.resize(static_cast<size_t>(byteCount));
+		HDC screen = ::GetDC(NULL);
+		if (!screen) return false;
+		const int rows = ::GetDIBits(screen, bitmap, 0, static_cast<UINT>(heightOut), pixelsOut.data(), &bitmapInfo, DIB_RGB_COLORS);
+		::ReleaseDC(NULL, screen);
+		return rows == heightOut;
+	}
+
+	bool CompareBitmap(HBITMAP expected, HBITMAP actual)
+	{
+		LONG expectedWidth = 0, expectedHeight = 0, actualWidth = 0, actualHeight = 0;
+		std::vector<BYTE> expectedPixels, actualPixels;
+		if (!ReadBitmapRgb24(expected, expectedWidth, expectedHeight, expectedPixels) ||
+			!ReadBitmapRgb24(actual, actualWidth, actualHeight, actualPixels)) return false;
+		return expectedWidth == actualWidth && expectedHeight == actualHeight &&
+			expectedPixels.size() == actualPixels.size() &&
+			memcmp(expectedPixels.data(), actualPixels.data(), expectedPixels.size()) == 0;
+	}
+
+	bool ComparePalette(HPALETTE expected, HPALETTE actual)
+	{
+		WORD expectedCount = 0, actualCount = 0;
+		if (!expected || !actual ||
+			::GetObject(expected, sizeof(expectedCount), &expectedCount) != sizeof(expectedCount) ||
+			::GetObject(actual, sizeof(actualCount), &actualCount) != sizeof(actualCount) ||
+			expectedCount == 0 || expectedCount != actualCount) return false;
+		std::vector<PALETTEENTRY> expectedEntries(expectedCount), actualEntries(actualCount);
+		if (::GetPaletteEntries(expected, 0, expectedCount, expectedEntries.data()) != expectedCount ||
+			::GetPaletteEntries(actual, 0, actualCount, actualEntries.data()) != actualCount) return false;
+		return memcmp(expectedEntries.data(), actualEntries.data(), expectedEntries.size() * sizeof(PALETTEENTRY)) == 0;
+	}
+
+	HGLOBAL CloneGlobalMemory(HGLOBAL source, SIZE_T size)
+	{
+		LPVOID data = ::GlobalLock(source);
+		if (!data) return NULL;
+		HGLOBAL clone = NewGlobalP(data, size);
+		::GlobalUnlock(source);
+		return clone;
+	}
+
+	// Caller already owns OpenClipboard; verify before releasing the lock so another
+	// process cannot replace clipboard contents between commit and verification.
+	bool VerifyClipboardTextOpen(const CStringW& expected)
+	{
 		HGLOBAL handle = ::GetClipboardData(CF_UNICODETEXT);
-		if (handle)
-		{
-			LPVOID data = ::GlobalLock(handle);
-			if (data)
-			{
-				ok = wcscmp(reinterpret_cast<const wchar_t*>(data), expected.GetString()) == 0;
-				::GlobalUnlock(handle);
-			}
-		}
-		::CloseClipboard();
-		return ok;
+		if (!handle) return false;
+		LPVOID data = ::GlobalLock(handle);
+		if (!data) return false;
+		bool matches = wcscmp(reinterpret_cast<const wchar_t*>(data), expected.GetString()) == 0;
+		::GlobalUnlock(handle);
+		return matches;
 	}
 
-	// Restore snapshot sau lỗi commit; SetClipboardData thành công → clipboard sở hữu
-	// HGLOBAL (gỡ khỏi snapshot); verify từng format bằng so bytes thật.
-	// Trả false khi restore thiếu format hoặc bytes verify sai.
-	bool RestoreClipboardSnapshot(CClipFormats& snapshot)
+	bool VerifyClipboardSnapshotOpen(const std::vector<ClipboardSnapshotEntry>& snapshot)
 	{
-		if (!OpenClipboardWithRetry(theApp.m_MainhWnd))
+		bool verified = true;
+		for (const ClipboardSnapshotEntry& expected : snapshot)
 		{
-			LogClient(L"restore: không mở được clipboard");
-			return false;
-		}
-		::EmptyClipboard();
-		// Marker để Ditto không tự capture nội dung restore thành clip mới.
-		::SetClipboardData(theApp.m_cfIgnoreClipboard, NewGlobalP("Ignore", sizeof("Ignore")));
-
-		for (int i = 0; i < snapshot.GetSize(); i++)
-		{
-			CClipFormat& format = snapshot[i];
-			if (!format.m_hgData || ::GlobalSize(format.m_hgData) == 0) continue;
-			if (g_clipboardFaultMode == DittoXClipboardFaultMode::FailRestore && i == 0)
+			HANDLE actual = ::GetClipboardData(expected.format);
+			if (!actual)
 			{
-				// Fault injection: format đầu tiên "bị mất" khi restore (giữ HGLOBAL để free sau).
-				LogClient(L"fault injection: bỏ qua format đầu khi restore");
-				continue;
+				verified = false;
+				break;
 			}
-			if (::SetClipboardData(format.m_cfType, format.m_hgData))
+			if (expected.kind == ClipboardSnapshotKind::Bitmap)
 			{
-				format.m_hgData = NULL; // clipboard sở hữu dữ liệu
+				if (!CompareBitmap(expected.bitmap, static_cast<HBITMAP>(actual))) verified = false;
+			}
+			else if (expected.kind == ClipboardSnapshotKind::Palette)
+			{
+				if (!ComparePalette(expected.palette, static_cast<HPALETTE>(actual))) verified = false;
 			}
 			else
 			{
-				::GlobalFree(format.m_hgData);
-				format.m_hgData = NULL;
+				HGLOBAL actualGlobal = static_cast<HGLOBAL>(actual);
+				if (!expected.global || ::GlobalSize(actualGlobal) != expected.size)
+				{
+					verified = false;
+				}
+				else
+				{
+					LPVOID expectedData = ::GlobalLock(expected.global);
+					LPVOID actualData = ::GlobalLock(actualGlobal);
+					if (!expectedData || !actualData)
+					{
+						if (expectedData) ::GlobalUnlock(expected.global);
+						if (actualData) ::GlobalUnlock(actualGlobal);
+					verified = false;
+				}
+				else
+				{
+					verified = memcmp(expectedData, actualData, expected.size) == 0;
+					::GlobalUnlock(expected.global);
+					::GlobalUnlock(actualGlobal);
+				}
+				}
 			}
+			if (!verified) break;
 		}
-		::CloseClipboard();
+		return verified;
+	}
 
-		// Xác minh từng format snapshot: tồn tại trên clipboard + đúng size + đúng bytes.
-		if (!::OpenClipboard(theApp.m_MainhWnd)) return false;
-		bool allVerified = true;
-		for (int i = 0; i < snapshot.GetSize(); i++)
+	HANDLE CloneSnapshotForClipboard(const ClipboardSnapshotEntry& entry)
+	{
+		if (entry.kind == ClipboardSnapshotKind::Bitmap)
 		{
-			CClipFormat& format = snapshot[i];
-			if (!format.m_hgData || ::GlobalSize(format.m_hgData) == 0) continue;
-			HGLOBAL handle = ::GetClipboardData(format.m_cfType);
-			if (!handle)
-			{
-				allVerified = false;
-				break;
-			}
-			SIZE_T expectedSize = ::GlobalSize(format.m_hgData);
-			if (::GlobalSize(handle) != expectedSize)
-			{
-				allVerified = false;
-				break;
-			}
-			LPVOID expectedData = ::GlobalLock(format.m_hgData);
-			LPVOID actualData = ::GlobalLock(handle);
-			if (!expectedData || !actualData)
-			{
-				if (expectedData) ::GlobalUnlock(format.m_hgData);
-				if (actualData) ::GlobalUnlock(handle);
-				allVerified = false;
-				break;
-			}
-			if (memcmp(expectedData, actualData, expectedSize) != 0)
-			{
-				allVerified = false;
-			}
-			::GlobalUnlock(format.m_hgData);
-			::GlobalUnlock(handle);
-			if (!allVerified) break;
+			return ::CopyImage(entry.bitmap, IMAGE_BITMAP, 0, 0, LR_CREATEDIBSECTION);
 		}
+		if (entry.kind == ClipboardSnapshotKind::Palette)
+		{
+			HPALETTE clone = NULL;
+			return ClonePalette(entry.palette, clone) ? clone : NULL;
+		}
+		return CloneGlobalMemory(entry.global, entry.size);
+	}
+
+	// Restore luôn xác minh toàn bộ snapshot; source copy giữ nguyên tới cuối để
+	// đối chiếu sau SetClipboardData (ownership chỉ chuyển của duplicate mới).
+	bool RestoreClipboardSnapshot(const std::vector<ClipboardSnapshotEntry>& snapshot)
+	{
+		bool snapshotHasIgnoreMarker = false;
+		for (const ClipboardSnapshotEntry& entry : snapshot)
+		{
+			if (entry.format == theApp.m_cfIgnoreClipboard)
+			{
+				snapshotHasIgnoreMarker = true;
+				break;
+			}
+		}
+		HGLOBAL marker = snapshotHasIgnoreMarker ? NULL : NewGlobalP("Ignore", sizeof("Ignore"));
+		if (!snapshotHasIgnoreMarker && !marker)
+		{
+			LogClient(L"restore: không cấp phát được ignore marker; vẫn thử khôi phục data formats");
+		}
+		if (!OpenClipboardWithRetry(theApp.m_MainhWnd))
+		{
+			if (marker) ::GlobalFree(marker);
+			LogClient(L"restore: không mở được clipboard");
+			return false;
+		}
+		if (!::EmptyClipboard())
+		{
+			::CloseClipboard();
+			if (marker) ::GlobalFree(marker);
+			LogClient(L"restore: EmptyClipboard lỗi");
+			return false;
+		}
+
+		bool allSet = snapshotHasIgnoreMarker || marker != NULL;
+		if (marker)
+		{
+			if (!::SetClipboardData(theApp.m_cfIgnoreClipboard, marker))
+			{
+				::GlobalFree(marker);
+				allSet = false;
+			}
+		}
+
+		for (size_t i = 0; i < snapshot.size(); i++)
+		{
+			const ClipboardSnapshotEntry& entry = snapshot[i];
+			if (g_clipboardFaultMode == DittoXClipboardFaultMode::FailRestore && i == 0)
+			{
+				LogClient(L"fault injection: bỏ qua format đầu khi restore");
+				allSet = false;
+				continue;
+			}
+			HANDLE duplicate = CloneSnapshotForClipboard(entry);
+			if (!duplicate)
+			{
+				allSet = false;
+				continue;
+			}
+			if (!::SetClipboardData(entry.format, duplicate))
+			{
+				if (entry.kind == ClipboardSnapshotKind::Bitmap || entry.kind == ClipboardSnapshotKind::Palette)
+					::DeleteObject(duplicate);
+				else
+					::GlobalFree(duplicate);
+				allSet = false;
+			}
+			// Successful SetClipboardData transfers ownership of duplicate to clipboard.
+		}
+		const bool allFormatsVerified = VerifyClipboardSnapshotOpen(snapshot);
+		const bool markerVerified = snapshotHasIgnoreMarker || ::GetClipboardData(theApp.m_cfIgnoreClipboard) != NULL;
 		::CloseClipboard();
-		return allVerified;
+		return allSet && allFormatsVerified && markerVerified;
 	}
 }
 
@@ -1015,9 +1233,12 @@ CStringW DittoXEpochMsToIso(long long epochMs)
 	int hours = static_cast<int>(rem / 3600000LL);
 	int minutes = static_cast<int>((rem / 60000LL) % 60);
 	int seconds = static_cast<int>((rem / 1000LL) % 60);
+	int milliseconds = static_cast<int>(rem % 1000LL);
 
+	// Keep fixed-width milliseconds so SQLite lexical expiry comparisons match
+	// Worker Date.toISOString() exactly (owner reuses link until expiresAt).
 	CStringW iso;
-	iso.Format(L"%04lld-%02lld-%02lldT%02d:%02d:%02dZ", year, month, day, hours, minutes, seconds);
+	iso.Format(L"%04lld-%02lld-%02lldT%02d:%02d:%02d.%03dZ", year, month, day, hours, minutes, seconds, milliseconds);
 	return iso;
 }
 
@@ -1225,6 +1446,8 @@ DittoXPublishOutcome DittoXPublish(const DittoXClipPayload& payload)
 	}
 
 	CStringW nowIso = DittoXUtcNowIso();
+	// Prune mọi entry expired ngay cả khi publish hiện tại là cache hit khác fingerprint.
+	CDittoXPublicLinkCache::PruneExpired(db, nowIso);
 
 	// Cache reuse: cùng fingerprint + expiresAt > now → copy URL, không upload.
 	CStringW cachedUrl, cachedExpiry;
@@ -1237,8 +1460,6 @@ DittoXPublishOutcome DittoXPublish(const DittoXClipPayload& payload)
 		outcome.expiresAt = cachedExpiry;
 		return outcome;
 	}
-
-	CDittoXPublicLinkCache::PruneExpired(db, nowIso);
 
 	// Pending từ lần chạy trước cùng fingerprint → replay finalize TRƯỚC, không upload mới.
 	CStringW pendingSession, pendingKey;
@@ -1270,10 +1491,24 @@ DittoXPublishOutcome DittoXPublish(const DittoXClipPayload& payload)
 	}
 
 	// Persist pending TRƯỚC PUT — crash/restart giữa chừng vẫn replay được.
-	CDittoXPublicLinkCache::SavePending(db, ctx.manifestHash, ctx.contentHash,
-		ctx.idempotencyKey, session.sessionId, DittoXUtcNowIso());
+	// Nếu SQLite ghi pending fail, tuyệt đối không upload/finalize: sau response loss
+	// sẽ không còn session/key để replay và lần Ctrl+Z sau có thể tạo link duplicate.
+	if (!CDittoXPublicLinkCache::SavePending(db, ctx.manifestHash, ctx.contentHash,
+		ctx.idempotencyKey, session.sessionId, DittoXUtcNowIso()))
+	{
+		outcome.status = DittoXPublishStatus::Network;
+		outcome.detail = L"Không lưu được trạng thái upload. Chưa gửi nội dung; thử lại.";
+		return outcome;
+	}
 
-	if (!PutAllObjects(ctx, session))
+	PutPackageResult uploaded = PutAllObjects(ctx, session);
+	if (uploaded == PutPackageResult::SessionCommitted)
+	{
+		// Upload-session reissue báo committed: replay finalize cùng session/key,
+		// không tạo session mới và không đánh mất completion receipt.
+		return TryPendingReplay(ctx, session.sessionId, db);
+	}
+	if (uploaded == PutPackageResult::Failed)
 	{
 		// PUT fail chắc chắn (chưa commit) → xoá pending để lần sau upload lại từ đầu.
 		CDittoXPublicLinkCache::RemovePending(db, ctx.idempotencyKey);
@@ -1283,7 +1518,7 @@ DittoXPublishOutcome DittoXPublish(const DittoXClipPayload& payload)
 	}
 
 	FinalizeResponse finalize = FinalizeWithRetry(ctx, session.sessionId);
-	if (finalize.ok && IsValidClipViewerPath(finalize.viewerUrl) && !finalize.expiresAt.IsEmpty())
+	if (finalize.ok && IsValidClipViewerPath(finalize.viewerUrl) && IsValidFutureExpiry(finalize.expiresAt))
 	{
 		CDittoXPublicLinkCache::MarkPublished(db, ctx.idempotencyKey,
 			finalize.viewerUrl, finalize.expiresAt, DittoXUtcNowIso());
@@ -1294,6 +1529,7 @@ DittoXPublishOutcome DittoXPublish(const DittoXClipPayload& payload)
 		return outcome;
 	}
 	if (!finalize.networkOk || finalize.statusCode >= 500 ||
+		(finalize.statusCode >= 200 && finalize.statusCode < 300) ||
 		finalize.error.CompareNoCase("session_in_progress") == 0)
 	{
 		// Ambiguous — giữ pending record; lần Ctrl+Z sau sẽ replay trước.
@@ -1317,59 +1553,84 @@ DittoXPublishOutcome DittoXPublish(const DittoXClipPayload& payload)
 DittoXClipboardCommitResult DittoXCommitUrlToClipboard(const CStringW& url)
 {
 	// Snapshot TRƯỚC mọi mutation; fail → abort, không đụng clipboard hiện tại.
-	CClipFormats snapshot;
+	std::vector<ClipboardSnapshotEntry> snapshot;
 	if (!SnapshotClipboard(snapshot))
 	{
 		return DittoXClipboardCommitResult::SnapshotFailed;
 	}
 
-	if (!OpenClipboardWithRetry(theApp.m_MainhWnd))
-	{
-		FreeSnapshot(snapshot);
-		return DittoXClipboardCommitResult::SnapshotFailed;
-	}
-	::EmptyClipboard();
-
+	// Preallocate marker + URL trước EmptyClipboard. Allocation failure không bao giờ
+	// được phép xảy ra sau khi clipboard cũ đã bị xoá.
 	HGLOBAL marker = NewGlobalP("Ignore", sizeof("Ignore"));
-	if (!::SetClipboardData(theApp.m_cfIgnoreClipboard, marker))
-	{
-		::GlobalFree(marker);
-		LogClient(L"cảnh báo: không set được ignore marker");
-	}
-
 	SIZE_T urlBytes = static_cast<SIZE_T>(url.GetLength() + 1) * sizeof(wchar_t);
 	HGLOBAL urlGlobal = ::GlobalAlloc(GMEM_MOVEABLE, urlBytes);
-	bool urlSet = false;
 	if (urlGlobal)
 	{
 		LPVOID data = ::GlobalLock(urlGlobal);
-		if (data)
+		if (!data)
 		{
-			wcscpy_s(reinterpret_cast<wchar_t*>(data), url.GetLength() + 1, url.GetString());
-			::GlobalUnlock(urlGlobal);
-			if (g_clipboardFaultMode == DittoXClipboardFaultMode::FailSetUrl)
-			{
-				// Fault injection: giả lập SetClipboardData lỗi sau khi đã EmptyClipboard.
-				LogClient(L"fault injection: bỏ qua SetClipboardData(URL)");
-				::GlobalFree(urlGlobal);
-			}
-			else
-			{
-				urlSet = ::SetClipboardData(CF_UNICODETEXT, urlGlobal) != NULL;
-				if (!urlSet) ::GlobalFree(urlGlobal);
-			}
+			::GlobalFree(urlGlobal);
+			urlGlobal = NULL;
 		}
 		else
 		{
-			::GlobalFree(urlGlobal);
+			memcpy(data, url.GetString(), urlBytes);
+			::GlobalUnlock(urlGlobal);
 		}
 	}
-	::CloseClipboard();
+	if (!marker || !urlGlobal)
+	{
+		if (marker) ::GlobalFree(marker);
+		if (urlGlobal) ::GlobalFree(urlGlobal);
+		FreeSnapshot(snapshot);
+		return DittoXClipboardCommitResult::PreparationFailed;
+	}
 
+	if (!OpenClipboardWithRetry(theApp.m_MainhWnd))
+	{
+		::GlobalFree(marker);
+		::GlobalFree(urlGlobal);
+		FreeSnapshot(snapshot);
+		return DittoXClipboardCommitResult::SnapshotFailed;
+	}
+	if (!::EmptyClipboard())
+	{
+		::CloseClipboard();
+		::GlobalFree(marker);
+		::GlobalFree(urlGlobal);
+		LogClient(L"EmptyClipboard lỗi — chạy restore snapshot phòng mutation một phần");
+		bool restored = RestoreClipboardSnapshot(snapshot);
+		FreeSnapshot(snapshot);
+		return restored ? DittoXClipboardCommitResult::CommitFailed : DittoXClipboardCommitResult::RestoreFailed;
+	}
+
+	// Marker phải thành công trước URL. Nếu marker fail, restore clipboard cũ thay vì
+	// để Ditto tự capture URL do chính nó vừa copy.
+	bool markerSet = ::SetClipboardData(theApp.m_cfIgnoreClipboard, marker) != NULL;
+	if (markerSet) marker = NULL; // clipboard sở hữu
+	else ::GlobalFree(marker);
+
+	bool urlSet = false;
+	if (markerSet)
+	{
+		if (g_clipboardFaultMode == DittoXClipboardFaultMode::FailSetUrl)
+		{
+			// Fault injection: giả lập SetClipboardData lỗi sau khi đã EmptyClipboard.
+			LogClient(L"fault injection: bỏ qua SetClipboardData(URL)");
+		}
+		else if (::SetClipboardData(CF_UNICODETEXT, urlGlobal))
+		{
+			urlSet = true;
+			urlGlobal = NULL; // clipboard sở hữu
+		}
+	}
+	if (urlGlobal) ::GlobalFree(urlGlobal);
+	// Verify both marker and URL while this thread still owns the clipboard lock.
 	if (urlSet)
 	{
-		urlSet = VerifyClipboardText(theApp.m_MainhWnd, url);
+		urlSet = ::GetClipboardData(theApp.m_cfIgnoreClipboard) != NULL && VerifyClipboardTextOpen(url);
 	}
+	::CloseClipboard();
 
 	if (urlSet)
 	{
@@ -1377,8 +1638,8 @@ DittoXClipboardCommitResult DittoXCommitUrlToClipboard(const CStringW& url)
 		return DittoXClipboardCommitResult::Committed;
 	}
 
-	// Commit lỗi sau khi đã EmptyClipboard → restore snapshot + verify từng format.
-	LogClient(L"set URL vào clipboard lỗi — restore snapshot");
+	// Commit lỗi sau EmptyClipboard → restore snapshot + verify MỌI format.
+	LogClient(L"set URL/ignore marker vào clipboard lỗi — restore snapshot");
 	if (!RestoreClipboardSnapshot(snapshot))
 	{
 		FreeSnapshot(snapshot);

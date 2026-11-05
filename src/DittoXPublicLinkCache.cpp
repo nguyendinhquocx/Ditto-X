@@ -124,7 +124,7 @@ bool CDittoXPublicLinkCache::FindPending(CppSQLite3DB& db, const CStringW& manif
 	CATCH_SQLITE_EXCEPTION_AND_RETURN(false)
 }
 
-void CDittoXPublicLinkCache::SavePending(CppSQLite3DB& db, const CStringW& manifestHash, const CStringW& contentHash,
+bool CDittoXPublicLinkCache::SavePending(CppSQLite3DB& db, const CStringW& manifestHash, const CStringW& contentHash,
 	const CStringW& idempotencyKey, const CStringW& sessionId, const CStringW& nowIso)
 {
 	try
@@ -140,8 +140,13 @@ void CDittoXPublicLinkCache::SavePending(CppSQLite3DB& db, const CStringW& manif
 			ToDbText(sessionId).GetString(),
 			nowIso.GetString(),
 			nowIso.GetString());
+		return true;
 	}
-	CATCH_SQLITE_EXCEPTION
+	catch (CppSQLite3Exception& e)
+	{
+		LogCache(StrF(_T("save pending failed: %d %s"), e.errorCode(), e.errorMessage()));
+		return false;
+	}
 }
 
 void CDittoXPublicLinkCache::MarkPublished(CppSQLite3DB& db, const CStringW& idempotencyKey,
