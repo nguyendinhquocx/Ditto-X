@@ -477,10 +477,13 @@ namespace
 
 		DWORD statusCode = 0;
 		DWORD statusSize = sizeof(statusCode);
-		WinHttpQueryHeaders(request.h, WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER,
-			WINHTTP_HEADER_NAME_BY_INDEX, &statusCode, &statusSize, WINHTTP_NO_HEADER_INDEX);
+		if (!WinHttpQueryHeaders(request.h, WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER,
+			WINHTTP_HEADER_NAME_BY_INDEX, &statusCode, &statusSize, WINHTTP_NO_HEADER_INDEX))
+		{
+			return false; // status unknown → bounded network retry; never classify as an HTTP code
+		}
 		statusCodeOut = statusCode;
-		return statusCode >= 200 && statusCode < 300;
+		return true; // response received; caller decides 2xx/403/5xx policy
 	}
 
 	// --- Response shapes ---
@@ -787,10 +790,14 @@ namespace
 		for (int attempt = 0; attempt < 2; attempt++)
 		{
 			DWORD status = 0;
-			bool sent = DittoXHttpPutPresigned(url, bytes, contentType, status);
-			if (sent && status >= 200 && status < 300) return PutResult::Ok;
-			if (!sent) { if (attempt == 0) continue; return PutResult::Failed; }
-			if (status >= 500 && attempt == 0) continue;
+			const bool responseReceived = DittoXHttpPutPresigned(url, bytes, contentType, status);
+			if (!responseReceived)
+			{
+				if (attempt == 0) continue; // network/unknown status → retry same signed URL once
+				return PutResult::Failed;
+			}
+			if (status >= 200 && status < 300) return PutResult::Ok;
+			if (status >= 500 && attempt == 0) continue; // bounded retry same URL for transient Worker/R2 error
 			if (status == 403) return PutResult::Reissue;
 			LogClient(L"PUT trả HTTP không mong đợi");
 			return PutResult::Failed;
@@ -1542,13 +1549,21 @@ bool DittoXBuildPayloadFromClip(CClip& clip, DittoXClipPayload& payload)
 
 	if (clip.ContainsClipFormat(CF_UNICODETEXT))
 	{
-		payload.markdownUtf8 = CTextConvert::UnicodeToUTF8(clip.GetUnicodeTextFormat());
-		return true;
+		CString text = clip.GetUnicodeTextFormat();
+		CString trimmed(text);
+		trimmed.Trim();
+		if (trimmed.IsEmpty()) return false; // no empty/whitespace-only public clip
+		payload.markdownUtf8 = CTextConvert::UnicodeToUTF8(text);
+		return !payload.markdownUtf8.IsEmpty();
 	}
 	if (clip.ContainsClipFormat(CF_TEXT))
 	{
-		payload.markdownUtf8 = CTextConvert::UnicodeToUTF8(CTextConvert::AnsiToUnicode(clip.GetCFTextTextFormat()));
-		return true;
+		CString text = CTextConvert::AnsiToUnicode(clip.GetCFTextTextFormat());
+		CString trimmed(text);
+		trimmed.Trim();
+		if (trimmed.IsEmpty()) return false;
+		payload.markdownUtf8 = CTextConvert::UnicodeToUTF8(text);
+		return !payload.markdownUtf8.IsEmpty();
 	}
 
 	return false;
