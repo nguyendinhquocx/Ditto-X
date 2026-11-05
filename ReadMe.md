@@ -13,7 +13,8 @@ A personalized fork of [sabrogden/Ditto](https://github.com/sabrogden/Ditto), th
 | Search | Slash type filters: `/image`, `/file`, `/text`, `/link`, `/star`, `/today` |
 | Save | **Smart Ctrl+S** — saves the selected clip to a file, auto-picking the format: image → `.png`, text → `.txt`; `Ctrl+Shift+S` forces image export |
 | Quick handoff | **Ctrl+X** in the clip list — exports one selected image as `.png` or text as UTF-8 `.txt` to `%TEMP%\Ditto-X\Handoff`, then copies the absolute path without a save dialog; the path temporarily replaces the `/image /link /today` placeholder, then restores it after 1.8 seconds |
-| Editor | `Ctrl+E` opens the clip editor (centered window, remembers position, caret at end of content); `Ctrl+Q` saves, closes and re-selects the edited clip in the list |
+| Public clip link | **Ctrl+Z** in the clip list — publishes the selected clip (image, or text with embedded images) as an expiring public link on `share.quoc.app/clip/` (12 hours), copies the URL, and shows it briefly in the search box; republishing identical content reuses the live link. Requires a one-time local credential via `tools/dittox-share-credential-setup.ps1` — without it, Ctrl+Z does nothing |
+| Editor | `Ctrl+E` opens the clip editor (centered window, remembers position, caret at end of content); `Ctrl+Q` saves and closes: an edited clip re-selects in the list, a new clip is inserted with default metadata (no Properties dialog), and an empty new tab is discarded |
 | List | ~40% taller rows, hairline separators, larger image thumbnails |
 | Popup | Window remembers its last position instead of jumping to the cursor |
 | Icons | New rounded app icon plus a disconnected-tray variant |
