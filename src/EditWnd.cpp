@@ -182,19 +182,19 @@ void CEditWnd::OnSave()
 	DoSave();
 }
 
-bool CEditWnd::DoSave(bool bDirectSaveNewClip)
+bool CEditWnd::DoSave(bool bDirectSaveNewClip, bool bShowSaveAnimation)
 {
 	bool bRet = false;
 	int nTab = m_tabControl.GetActiveTab();
 	if(nTab >= 0 && nTab < (int)m_edits.size())
 	{
-		bRet = DoSaveItem(nTab, bDirectSaveNewClip);
+		bRet = DoSaveItem(nTab, bDirectSaveNewClip, bShowSaveAnimation);
 	}
 
 	return bRet;
 }
 
-bool CEditWnd::DoSaveItem(int index, bool bDirectSaveNewClip)
+bool CEditWnd::DoSaveItem(int index, bool bDirectSaveNewClip, bool bShowSaveAnimation)
 {
 	bool bRet = false;
 	BOOL bUpdateDesc = m_updateDescriptionButton.GetCheck();
@@ -210,8 +210,12 @@ bool CEditWnd::DoSaveItem(int index, bool bDirectSaveNewClip)
 				m_tabControl.SetTabTitle(index, pEdit->GetDesc());
 			}
 
-			if(nRet == SAVED_CLIP_TO_DB)
+			if(nRet == SAVED_CLIP_TO_DB && bShowSaveAnimation)
 			{
+				//Save fly-to-button animation: only for explicit save flows (Ctrl+S,
+				//save button, Shift+Esc). Ctrl+Q quick-back skips it — the animation
+				//runs a 10ms-per-step message-pumped loop that reads as lag right
+				//before the editor closes.
 				CSaveAnimation Ani;
 				CRect cr;
 				pEdit->GetWindowRect(cr);
@@ -430,7 +434,8 @@ void CEditWnd::OnForceClose()
 			//Save failed: keep the tab and its content, do not close (Ctrl+Q
 			//must never lose an edited clip because the DB write errored).
 			//Ctrl+Q trên clip mới lưu thẳng (không Properties); Ctrl+S vẫn dùng luồng cũ.
-			if(!DoSave(true))
+			//bShowSaveAnimation=false: back nhanh, không vẽ hiệu ứng lưu.
+			if(!DoSave(true, false))
 			{
 				return;
 			}
