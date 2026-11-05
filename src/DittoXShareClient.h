@@ -75,6 +75,7 @@ enum class DittoXClipboardCommitResult
 {
 	Committed,		// URL đã nằm trong clipboard (verify xong)
 	SnapshotFailed,	// không snapshot/mở được clipboard → không chủ động đổi dữ liệu
+	ClipboardChanged,	// clipboard đổi giữa snapshot và commit → không ghi đè nội dung mới
 	PreparationFailed,	// cấp phát URL/marker lỗi trước EmptyClipboard → clipboard vẫn cũ
 	CommitFailed,	// set URL lỗi sau EmptyClipboard → đã restore snapshot thành công
 	RestoreFailed	// restore sau lỗi cũng fail — clipboard có thể không còn nguyên
@@ -102,7 +103,7 @@ CStringW DittoXUtcNowIso();
 long long DittoXUtcNowEpochMs();
 // SYSTEMTIME UTC → epoch ms (dùng chung nội bộ + cache).
 long long DittoXSystemTimeToEpochMs(const SYSTEMTIME& st);
-// Parse ISO 8601 UTC ("...T...Z", millis optional) sang epoch ms; trả LLONG_MIN khi sai.
+// Parse strict UTC ISO-8601 (YYYY-MM-DDTHH:MM:SS[.mmm]Z); trả LLONG_MIN khi sai.
 long long DittoXIsoToEpochMs(const CStringW& iso);
 // Epoch ms → ISO 8601 UTC "YYYY-MM-DDTHH:MM:SS.mmmZ" (cache expiry/prune).
 CStringW DittoXEpochMsToIso(long long epochMs);

@@ -373,8 +373,11 @@ namespace
 
 		DWORD statusCode = 0;
 		DWORD statusSize = sizeof(statusCode);
-		WinHttpQueryHeaders(request.h, WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER,
-			WINHTTP_HEADER_NAME_BY_INDEX, &statusCode, &statusSize, WINHTTP_NO_HEADER_INDEX);
+		if (!WinHttpQueryHeaders(request.h, WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER,
+			WINHTTP_HEADER_NAME_BY_INDEX, &statusCode, &statusSize, WINHTTP_NO_HEADER_INDEX))
+		{
+			return result; // status unknown → caller treats as ambiguous; never claim commit success
+		}
 		result.statusCode = statusCode;
 
 		char chunk[16 * 1024];
@@ -554,19 +557,21 @@ namespace
 		out.networkOk = http.networkOk;
 		out.statusCode = http.statusCode;
 		if (!http.networkOk) return out;
-		int viewerPos = JsonValuePos(http.body, "viewerUrl");
-		if (viewerPos >= 0)
+		if (http.statusCode < 200 || http.statusCode >= 300)
 		{
-			out.viewerUrl = Utf8ToWide(JsonStringAt(http.body, viewerPos));
-			int expiresPos = JsonValuePos(http.body, "expiresAt");
-			if (expiresPos >= 0) out.expiresAt = Utf8ToWide(JsonStringAt(http.body, expiresPos));
-			out.ok = !out.viewerUrl.IsEmpty();
-		}
-		else
-		{
+			// Never accept a viewerUrl carried by a non-2xx body as a successful finalize.
 			int errorPos = JsonValuePos(http.body, "error");
 			if (errorPos >= 0) out.error = JsonStringAt(http.body, errorPos);
+			return out;
 		}
+
+		int viewerPos = JsonValuePos(http.body, "viewerUrl");
+		int expiresPos = JsonValuePos(http.body, "expiresAt");
+		if (viewerPos < 0 || expiresPos < 0) return out;
+		out.viewerUrl = Utf8ToWide(JsonStringAt(http.body, viewerPos));
+		out.expiresAt = Utf8ToWide(JsonStringAt(http.body, expiresPos));
+		// A 2xx with missing/malformed fields remains an ambiguous commit; caller retains pending.
+		out.ok = !out.viewerUrl.IsEmpty() && !out.expiresAt.IsEmpty();
 		return out;
 	}
 
@@ -576,8 +581,8 @@ namespace
 	{
 		if (viewerUrl.Left(6) != L"/clip/") return false;
 		CStringW token = viewerUrl.Mid(6);
-		if (token.IsEmpty()) return false;
-		if (token.GetLength() > 128) return false;
+		// Worker currently generates 16-byte base64url public tokens (22 chars, no padding).
+		if (token.GetLength() != 22) return false;
 		for (int i = 0; i < token.GetLength(); i++)
 		{
 			wchar_t ch = token[i];
@@ -798,6 +803,7 @@ namespace
 		}
 		if (!finalize.networkOk || finalize.statusCode >= 500 ||
 			(finalize.statusCode >= 200 && finalize.statusCode < 300) ||
+			finalize.error.IsEmpty() ||
 			finalize.error.CompareNoCase("session_in_progress") == 0)
 		{
 			// Ambiguous: commit có thể đã xảy ra. Giữ pending, không upload mới.
@@ -906,15 +912,19 @@ namespace
 		return entry.global != NULL;
 	}
 
-	bool SnapshotClipboard(std::vector<ClipboardSnapshotEntry>& snapshot)
+	bool SnapshotClipboard(std::vector<ClipboardSnapshotEntry>& snapshot, DWORD& sequenceOut)
 	{
 		snapshot.clear();
+		sequenceOut = 0;
 		if (!OpenClipboardWithRetry(theApp.m_MainhWnd))
 		{
 			LogClient(L"không mở được clipboard để snapshot");
 			return false;
 		}
 		bool ok = true;
+		// Capture the sequence while holding OpenClipboard: any write between snapshot
+		// and the later commit-lock acquisition is detectable before EmptyClipboard.
+		sequenceOut = ::GetClipboardSequenceNumber();
 		UINT format = ::EnumClipboardFormats(0);
 		while (format != 0)
 		{
@@ -928,6 +938,7 @@ namespace
 			snapshot.push_back(entry);
 			format = ::EnumClipboardFormats(format);
 		}
+		if (ok && ::GetClipboardSequenceNumber() != sequenceOut) ok = false;
 		::CloseClipboard();
 		if (!ok)
 		{
@@ -1092,9 +1103,11 @@ namespace
 		return CloneGlobalMemory(entry.global, entry.size);
 	}
 
+	enum class ClipboardRestoreResult { Restored, ChangedByOtherProcess, Failed };
+
 	// Restore luôn xác minh toàn bộ snapshot; source copy giữ nguyên tới cuối để
 	// đối chiếu sau SetClipboardData (ownership chỉ chuyển của duplicate mới).
-	bool RestoreClipboardSnapshot(const std::vector<ClipboardSnapshotEntry>& snapshot)
+	ClipboardRestoreResult RestoreClipboardSnapshot(const std::vector<ClipboardSnapshotEntry>& snapshot, DWORD expectedSequence)
 	{
 		bool snapshotHasIgnoreMarker = false;
 		for (const ClipboardSnapshotEntry& entry : snapshot)
@@ -1114,14 +1127,23 @@ namespace
 		{
 			if (marker) ::GlobalFree(marker);
 			LogClient(L"restore: không mở được clipboard");
-			return false;
+			return ClipboardRestoreResult::Failed;
+		}
+		// Sau lần snapshot/commit lỗi có thể app khác đã ghi clipboard mới; không được
+		// khôi phục bản snapshot cũ đè lên nội dung mới của app đó.
+		if (::GetClipboardSequenceNumber() != expectedSequence)
+		{
+			::CloseClipboard();
+			if (marker) ::GlobalFree(marker);
+			LogClient(L"restore bỏ qua vì clipboard đã đổi bởi process khác");
+			return ClipboardRestoreResult::ChangedByOtherProcess;
 		}
 		if (!::EmptyClipboard())
 		{
 			::CloseClipboard();
 			if (marker) ::GlobalFree(marker);
 			LogClient(L"restore: EmptyClipboard lỗi");
-			return false;
+			return ClipboardRestoreResult::Failed;
 		}
 
 		bool allSet = snapshotHasIgnoreMarker || marker != NULL;
@@ -1162,7 +1184,9 @@ namespace
 		const bool allFormatsVerified = VerifyClipboardSnapshotOpen(snapshot);
 		const bool markerVerified = snapshotHasIgnoreMarker || ::GetClipboardData(theApp.m_cfIgnoreClipboard) != NULL;
 		::CloseClipboard();
-		return allSet && allFormatsVerified && markerVerified;
+		return allSet && allFormatsVerified && markerVerified
+			? ClipboardRestoreResult::Restored
+			: ClipboardRestoreResult::Failed;
 	}
 }
 
@@ -1244,14 +1268,49 @@ CStringW DittoXEpochMsToIso(long long epochMs)
 
 long long DittoXIsoToEpochMs(const CStringW& iso)
 {
-	// Chấp nhận "YYYY-MM-DDTHH:MM:SS(.mmm)Z" (server trả có/không millis).
-	int year = 0, month = 0, day = 0, hour = 0, minute = 0, second = 0, millis = 0;
-	swscanf_s(iso.GetString(), L"%4d-%2d-%2dT%2d:%2d:%2d.%3d",
-		&year, &month, &day, &hour, &minute, &second, &millis);
-	if (year < 1970 || month < 1 || month > 12 || day < 1 || day > 31)
+	// Strict UTC ISO-8601 only: YYYY-MM-DDTHH:MM:SSZ or YYYY-MM-DDTHH:MM:SS.mmmZ.
+	// Worker Date.toISOString() returns the fixed-millisecond form; accepting a prefix
+	// with missing Z/fields could cache a malformed or already ambiguous finalize receipt.
+	const int length = iso.GetLength();
+	const bool hasMillis = length == 24;
+	if (length != 20 && !hasMillis) return LLONG_MIN;
+	if (iso[4] != L'-' || iso[7] != L'-' || iso[10] != L'T' ||
+		iso[13] != L':' || iso[16] != L':' ||
+		(hasMillis ? (iso[19] != L'.' || iso[23] != L'Z') : (iso[19] != L'Z')))
 	{
 		return LLONG_MIN;
 	}
+
+	auto parseDigits = [&iso](int start, int count, int& value) -> bool
+	{
+		value = 0;
+		for (int i = 0; i < count; i++)
+		{
+			wchar_t ch = iso[start + i];
+			if (ch < L'0' || ch > L'9') return false;
+			value = value * 10 + static_cast<int>(ch - L'0');
+		}
+		return true;
+	};
+
+	int year = 0, month = 0, day = 0, hour = 0, minute = 0, second = 0, millis = 0;
+	if (!parseDigits(0, 4, year) || !parseDigits(5, 2, month) || !parseDigits(8, 2, day) ||
+		!parseDigits(11, 2, hour) || !parseDigits(14, 2, minute) || !parseDigits(17, 2, second))
+	{
+		return LLONG_MIN;
+	}
+	if (hasMillis && !parseDigits(20, 3, millis)) return LLONG_MIN;
+	if (year < 1970 || month < 1 || month > 12 || hour > 23 || minute > 59 || second > 59 || millis > 999)
+	{
+		return LLONG_MIN;
+	}
+
+	static const int daysPerMonth[] = { 31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31 };
+	int maxDay = daysPerMonth[month - 1];
+	const bool leapYear = (year % 4 == 0 && year % 100 != 0) || year % 400 == 0;
+	if (month == 2 && leapYear) maxDay = 29;
+	if (day < 1 || day > maxDay) return LLONG_MIN;
+
 	SYSTEMTIME st = {};
 	st.wYear = static_cast<WORD>(year);
 	st.wMonth = static_cast<WORD>(month);
@@ -1530,6 +1589,7 @@ DittoXPublishOutcome DittoXPublish(const DittoXClipPayload& payload)
 	}
 	if (!finalize.networkOk || finalize.statusCode >= 500 ||
 		(finalize.statusCode >= 200 && finalize.statusCode < 300) ||
+		finalize.error.IsEmpty() ||
 		finalize.error.CompareNoCase("session_in_progress") == 0)
 	{
 		// Ambiguous — giữ pending record; lần Ctrl+Z sau sẽ replay trước.
@@ -1554,7 +1614,8 @@ DittoXClipboardCommitResult DittoXCommitUrlToClipboard(const CStringW& url)
 {
 	// Snapshot TRƯỚC mọi mutation; fail → abort, không đụng clipboard hiện tại.
 	std::vector<ClipboardSnapshotEntry> snapshot;
-	if (!SnapshotClipboard(snapshot))
+	DWORD snapshotSequence = 0;
+	if (!SnapshotClipboard(snapshot, snapshotSequence))
 	{
 		return DittoXClipboardCommitResult::SnapshotFailed;
 	}
@@ -1593,15 +1654,28 @@ DittoXClipboardCommitResult DittoXCommitUrlToClipboard(const CStringW& url)
 		FreeSnapshot(snapshot);
 		return DittoXClipboardCommitResult::SnapshotFailed;
 	}
-	if (!::EmptyClipboard())
+	if (::GetClipboardSequenceNumber() != snapshotSequence)
 	{
 		::CloseClipboard();
 		::GlobalFree(marker);
 		::GlobalFree(urlGlobal);
-		LogClient(L"EmptyClipboard lỗi — chạy restore snapshot phòng mutation một phần");
-		bool restored = RestoreClipboardSnapshot(snapshot);
 		FreeSnapshot(snapshot);
-		return restored ? DittoXClipboardCommitResult::CommitFailed : DittoXClipboardCommitResult::RestoreFailed;
+		return DittoXClipboardCommitResult::ClipboardChanged;
+	}
+	if (!::EmptyClipboard())
+	{
+		const DWORD failedCommitSequence = ::GetClipboardSequenceNumber();
+		::CloseClipboard();
+		::GlobalFree(marker);
+		::GlobalFree(urlGlobal);
+		LogClient(L"EmptyClipboard lỗi — chạy restore snapshot phòng mutation một phần");
+		ClipboardRestoreResult restored = RestoreClipboardSnapshot(snapshot, failedCommitSequence);
+		FreeSnapshot(snapshot);
+		if (restored == ClipboardRestoreResult::ChangedByOtherProcess)
+			return DittoXClipboardCommitResult::ClipboardChanged;
+		return restored == ClipboardRestoreResult::Restored
+			? DittoXClipboardCommitResult::CommitFailed
+			: DittoXClipboardCommitResult::RestoreFailed;
 	}
 
 	// Marker phải thành công trước URL. Nếu marker fail, restore clipboard cũ thay vì
@@ -1630,6 +1704,7 @@ DittoXClipboardCommitResult DittoXCommitUrlToClipboard(const CStringW& url)
 	{
 		urlSet = ::GetClipboardData(theApp.m_cfIgnoreClipboard) != NULL && VerifyClipboardTextOpen(url);
 	}
+	const DWORD failedCommitSequence = urlSet ? 0 : ::GetClipboardSequenceNumber();
 	::CloseClipboard();
 
 	if (urlSet)
@@ -1640,11 +1715,11 @@ DittoXClipboardCommitResult DittoXCommitUrlToClipboard(const CStringW& url)
 
 	// Commit lỗi sau EmptyClipboard → restore snapshot + verify MỌI format.
 	LogClient(L"set URL/ignore marker vào clipboard lỗi — restore snapshot");
-	if (!RestoreClipboardSnapshot(snapshot))
-	{
-		FreeSnapshot(snapshot);
-		return DittoXClipboardCommitResult::RestoreFailed;
-	}
+	ClipboardRestoreResult restored = RestoreClipboardSnapshot(snapshot, failedCommitSequence);
 	FreeSnapshot(snapshot);
-	return DittoXClipboardCommitResult::CommitFailed;
+	if (restored == ClipboardRestoreResult::ChangedByOtherProcess)
+		return DittoXClipboardCommitResult::ClipboardChanged;
+	return restored == ClipboardRestoreResult::Restored
+		? DittoXClipboardCommitResult::CommitFailed
+		: DittoXClipboardCommitResult::RestoreFailed;
 }

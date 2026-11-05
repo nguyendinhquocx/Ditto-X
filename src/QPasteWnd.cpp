@@ -6107,6 +6107,9 @@ void CQPasteWnd::HandleDittoXPublishDone(const DittoXPublishOutcome& outcome)
 		case DittoXClipboardCommitResult::SnapshotFailed:
 			ShowQuickExportFeedback(_T("Không đọc được clipboard hiện tại — bỏ copy link để giữ nguyên nội dung cũ"));
 			break;
+		case DittoXClipboardCommitResult::ClipboardChanged:
+			ShowQuickExportFeedback(_T("Clipboard vừa đổi — không ghi đè nội dung mới. Nhấn Ctrl+Z để thử lại."));
+			break;
 		case DittoXClipboardCommitResult::PreparationFailed:
 			ShowQuickExportFeedback(_T("Không chuẩn bị được dữ liệu clipboard — clipboard cũ vẫn nguyên"));
 			break;

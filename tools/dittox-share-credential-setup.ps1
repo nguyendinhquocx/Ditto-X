@@ -1,4 +1,4 @@
-# dittox-share-credential-setup.ps1 — cấu hình Ditto credential cho tính năng Ctrl+Z
+﻿# dittox-share-credential-setup.ps1 — cấu hình Ditto credential cho tính năng Ctrl+Z
 # (SPEC-2026-11-05-dittox-quick-handoff-public-clip).
 #
 # Nhập secret qua secure prompt (không echo), ghi vào Windows Credential Manager
@@ -83,56 +83,67 @@ if ($secureKey.Length -eq 0)
     exit 1
 }
 
-# Giải SecureString trong bộ nhớ, ghi ngay vào Credential Manager rồi zero hoá.
+# Chỉ copy ASCII printable từ SecureString; CredentialBlob phải là UTF-8 bytes,
+# không phải từng byte thấp của UTF-16 BSTR (trường hợp cũ chèn NUL sau mỗi ký tự).
 $bstr = [System.Runtime.InteropServices.Marshal]::SecureStringToBSTR($secureKey)
+$bytes = $null
+$ptr = [System.IntPtr]::Zero
 $credentialWritten = $false
 try
 {
-    $plainLength = [System.Runtime.InteropServices.Marshal]::StringLen($bstr)
+    $plainLength = 0
+    while ($true)
+    {
+        $codeUnit = [System.Runtime.InteropServices.Marshal]::ReadInt16($bstr, $plainLength * 2)
+        if ($codeUnit -eq 0) { break }
+        if ($codeUnit -lt 0x21 -or $codeUnit -gt 0x7E)
+        {
+            throw 'Credential phải là ASCII printable, không chứa khoảng trắng/control.'
+        }
+        $plainLength++
+        if ($plainLength -gt 512) { throw 'Credential dài quá giới hạn an toàn.' }
+    }
+    if ($plainLength -eq 0) { throw 'Key rỗng — không ghi gì cả.' }
+
     $bytes = New-Object byte[] $plainLength
     for ($i = 0; $i -lt $plainLength; $i++)
     {
-        $bytes[$i] = [byte][System.Runtime.InteropServices.Marshal]::ReadByte($bstr, $i)
+        $bytes[$i] = [byte][System.Runtime.InteropServices.Marshal]::ReadInt16($bstr, $i * 2)
     }
 
     $ptr = [System.Runtime.InteropServices.Marshal]::AllocHGlobal($plainLength)
-    try
-    {
-        [System.Runtime.InteropServices.Marshal]::Copy($bytes, 0, $ptr, $plainLength)
+    [System.Runtime.InteropServices.Marshal]::Copy($bytes, 0, $ptr, $plainLength)
 
-        $credential = New-Object DittoXCred+CREDENTIAL
-        $credential.Flags = 0
-        $credential.Type = [DittoXCred]::CRED_TYPE_GENERIC
-        $credential.TargetName = $TargetName
-        $credential.Comment = 'Ditto-X Ctrl+Z public clip (SPEC-2026-11-05). Rotate bằng script này.'
-        $credential.CredentialBlobSize = $plainLength
-        $credential.CredentialBlob = $ptr
-        $credential.Persist = [DittoXCred]::CRED_PERSIST_LOCAL_MACHINE
-        $credential.AttributeCount = 0
-        $credential.Attributes = [System.IntPtr]::Zero
-        $credential.TargetAlias = [string]::Empty
-        $credential.UserName = [string]::Empty
+    $credential = New-Object DittoXCred+CREDENTIAL
+    $credential.Flags = 0
+    $credential.Type = [DittoXCred]::CRED_TYPE_GENERIC
+    $credential.TargetName = $TargetName
+    $credential.Comment = 'Ditto-X Ctrl+Z public clip (SPEC-2026-11-05). Rotate bằng script này.'
+    $credential.CredentialBlobSize = $plainLength
+    $credential.CredentialBlob = $ptr
+    $credential.Persist = [DittoXCred]::CRED_PERSIST_LOCAL_MACHINE
+    $credential.AttributeCount = 0
+    $credential.Attributes = [System.IntPtr]::Zero
+    $credential.TargetAlias = [string]::Empty
+    $credential.UserName = [string]::Empty
 
-        if (-not [DittoXCred]::CredWrite([ref]$credential, 0))
-        {
-            throw "CredWrite lỗi (Win32 code $([System.Runtime.InteropServices.Marshal]::GetLastWin32Error()))."
-        }
-        $credentialWritten = $true
-    }
-    finally
+    if (-not [DittoXCred]::CredWrite([ref]$credential, 0))
     {
-        [System.Runtime.InteropServices.Marshal]::FreeHGlobal($ptr)
+        throw "CredWrite lỗi (Win32 code $([System.Runtime.InteropServices.Marshal]::GetLastWin32Error()))."
     }
+    $credentialWritten = $true
 }
 finally
 {
-    # Zero hoá buffer trước khi trả bộ nhớ — key không còn sót trong process sau script.
-    if ($bstr -ne [System.IntPtr]::Zero)
+    # Zero hoá mọi bản sao trong process trước khi kết thúc flow.
+    if ($ptr -ne [System.IntPtr]::Zero)
     {
-        [System.Runtime.InteropServices.Marshal]::ZeroBSTR($bstr) 2>$null
-        [System.Runtime.InteropServices.Marshal]::ZeroFreeBSTR($bstr)
+        for ($i = 0; $i -lt $plainLength; $i++) { [System.Runtime.InteropServices.Marshal]::WriteByte($ptr, $i, 0) }
+        [System.Runtime.InteropServices.Marshal]::FreeHGlobal($ptr)
     }
     if ($bytes) { [System.Array]::Clear($bytes, 0, $bytes.Length) }
+    if ($bstr -ne [System.IntPtr]::Zero) { [System.Runtime.InteropServices.Marshal]::ZeroFreeBSTR($bstr) }
+    if ($secureKey) { $secureKey.Dispose() }
 }
 
 if ($credentialWritten)
