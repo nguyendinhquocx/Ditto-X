@@ -1364,7 +1364,7 @@ CStringW DittoXUtcNowIso()
 
 CStringW DittoXEpochMsToIso(long long epochMs)
 {
-	// Đổi epoch ms → UTC ISO "YYYY-MM-DDTHH:MM:SSZ" (bỏ millis để cache so sánh gọn).
+	// Đổi epoch ms → UTC ISO fixed-millisecond để so sánh expiry không mất precision.
 	long long days = epochMs / 86400000LL;
 	long long rem = epochMs % 86400000LL;
 	if (rem < 0) { rem += 86400000LL; days -= 1; }

@@ -191,8 +191,8 @@ void CDittoXPublicLinkCache::PruneExpired(CppSQLite3DB& db, const CStringW& nowI
 {
 	try
 	{
-		// Compare parsed epoch values, not ISO strings: old/new clients may persist
-		// timestamps with or without milliseconds, whose lexical order differs at Z.
+		// Compare parsed epoch values, not ISO strings: mixed timestamp precision can
+		// misorder values within the same second (the current Worker emits milliseconds).
 		const long long nowMs = DittoXIsoToEpochMs(nowIso);
 		if (nowMs == LLONG_MIN) return;
 		const long long stalePendingMs = nowMs - PENDING_STALE_MS;
