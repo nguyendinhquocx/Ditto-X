@@ -1529,7 +1529,225 @@ namespace
 	// control word CUỐI của group (RichEdit ngắt hex mỗi ~78 ký tự nên phải nối
 	// nhiều run, bỏ newline). Không phải PNG/JPEG (metafile/EMF) thì trả false —
 	// caller rơi về text như trước, không mất text.
-	bool DittoXExtractRtfBlip(const CStringA& rtf, std::vector<BYTE>& imageBytes, bool& isPngBlip)
+	// Destination groups chỉ chứa metadata — parser bỏ cả group.
+	bool DittoXIsRtfDestinationWord(const CStringA& word)
+	{
+		static const char* const kDestinations[] = {
+			"fonttbl", "colortbl", "stylesheet", "info", "pict", "object",
+			"header", "headerl", "headerr", "headerf", "footer", "footerl",
+			"footerr", "footerf", "footnote", "listtable", "listoverridetable",
+			"revtbl", "rsidtbl", "fchars", "lchars", "objdata", "wgrffmtid",
+			"themedata", "colorschememapping", "datastore", "xmlnstype",
+			"latentstyles", "generator"
+		};
+		for (const char* d : kDestinations)
+		{
+			if (word == d) return true;
+		}
+		return false;
+	}
+
+	// RTF span → plain text (CStringW). Đủ dùng cho clip RichEdit/Word: bỏ
+	// destination groups ({\fonttbl}, {\*\...}), map \par/\line → newline,
+	// \uN? → ký tự Unicode (skip \ucN fallback), \'xx → byte codepage 1252,
+	// escape \\ \{ \} → ký tự literal. Không đụng shell/shapes nâng cao —
+	// chỉ cần đủ để giữ thứ tự text xung quanh ảnh trong clip mixed.
+	CStringW DittoXRtfSpanToText(const CStringA& rtf, int start, int end)
+	{
+		CStringW out;
+		bool skipStack[64] = {};
+		int depth = 0;
+		int unicodeSkip = 1;
+
+		int i = start;
+		while (i < end)
+		{
+			char c = rtf[i];
+			if (c == '{')
+			{
+				bool isDest = false;
+				if (i + 1 < end && rtf[i + 1] == '\\')
+				{
+					if (i + 2 < end && rtf[i + 2] == '*')
+					{
+						isDest = true;
+					}
+					else
+					{
+						CStringA word;
+						int j = i + 2;
+						while (j < end && isalpha(static_cast<unsigned char>(rtf[j])))
+						{
+							word += rtf[j];
+							j++;
+						}
+						if (!word.IsEmpty() && DittoXIsRtfDestinationWord(word)) isDest = true;
+					}
+				}
+				if (depth < 63)
+				{
+					depth++;
+					skipStack[depth] = skipStack[depth - 1] || isDest;
+				}
+				i++;
+				continue;
+			}
+			if (c == '}')
+			{
+				if (depth > 0) depth--;
+				i++;
+				continue;
+			}
+
+			bool skipping = skipStack[min(depth, 63)];
+			if (c == '\\')
+			{
+				int j = i + 1;
+				if (j >= end) break;
+				char c2 = rtf[j];
+				if (c2 == '\\' || c2 == '{' || c2 == '}')
+				{
+					if (!skipping) out += static_cast<wchar_t>(c2);
+					i = j + 1;
+					continue;
+				}
+				if (c2 == '~')
+				{
+					if (!skipping) out += L' ';
+					i = j + 1;
+					continue;
+				}
+				if (c2 == '\'')
+				{
+					int hi = j + 1 < end ? DittoXHexVal(rtf[j + 1]) : -1;
+					int lo = j + 2 < end ? DittoXHexVal(rtf[j + 2]) : -1;
+					if (hi >= 0 && lo >= 0)
+					{
+					if (!skipping)
+						{
+							BYTE b = static_cast<BYTE>((hi << 4) | lo);
+							// RichEdit best-fit: đ/Đ không nằm trong cp1252 nên được ghi thành
+							// \'f0/\'D0 (ð/Ð trông giống hệt) — map ngược về đúng glyph Việt.
+							if (b == 0xF0) out += L'\x0111';
+							else if (b == 0xD0) out += L'\x0110';
+							else
+							{
+								wchar_t w[2] = {};
+								if (MultiByteToWideChar(1252, 0, reinterpret_cast<LPCSTR>(&b), 1, w, 1) > 0)
+								{
+									out += w[0];
+								}
+							}
+						}
+						i = j + 3;
+						continue;
+					}
+					i = j + 1;
+					continue;
+				}
+
+				CStringA word;
+				int k = j;
+				while (k < end && isalpha(static_cast<unsigned char>(rtf[k])))
+				{
+					word += rtf[k];
+					k++;
+				}
+				if (word.IsEmpty())
+				{
+					i = j + 1;
+					continue;
+				}
+				long param = 0;
+				bool hasParam = false;
+				bool negative = false;
+				if (k < end && rtf[k] == '-')
+				{
+					negative = true;
+					k++;
+				}
+				while (k < end && isdigit(static_cast<unsigned char>(rtf[k])))
+				{
+					param = param * 10 + (rtf[k] - '0');
+					hasParam = true;
+					k++;
+				}
+				if (negative) param = -param;
+				if (k < end && rtf[k] == ' ') k++;
+
+				if (word == "uc")
+				{
+					if (hasParam) unicodeSkip = static_cast<int>(param);
+				}
+				else if (word == "u" && hasParam)
+				{
+					if (!skipping)
+					{
+						out += static_cast<wchar_t>(param & 0xFFFF);
+					}
+					for (int s = 0; s < unicodeSkip && k < end; s++)
+					{
+						if (rtf[k] == '\\' && k + 1 < end && rtf[k + 1] == '\'') k += 3;
+						else k += 1;
+					}
+				}
+				else if (word == "par" || word == "line")
+				{
+					if (!skipping) out += L'\n';
+				}
+				else if (word == "tab")
+				{
+					if (!skipping) out += L'\t';
+				}
+				i = k;
+				continue;
+			}
+			if (!skipping && static_cast<BYTE>(c) >= 0x20)
+			{
+				out += static_cast<wchar_t>(static_cast<BYTE>(c));
+			}
+			i++;
+		}
+		return out;
+	}
+
+	// Span RTF → UTF-8 text đã trim 2 đầu (compose tự chèn separator).
+	CStringA DittoXRtfSpanToUtf8(const CStringA& rtf, int start, int end)
+	{
+		CStringW wide = DittoXRtfSpanToText(rtf, start, end);
+		wide.Trim();
+		if (wide.IsEmpty()) return "";
+		return CTextConvert::UnicodeToUTF8(wide);
+	}
+
+	// Text từ formats: CF_UNICODETEXT ưu tiên, fallback CF_TEXT. Text
+	// whitespace-only → rỗng.
+	CStringA DittoXPlainTextUtf8(CClip& clip)
+	{
+		if (clip.ContainsClipFormat(CF_UNICODETEXT))
+		{
+			CString text = clip.GetUnicodeTextFormat();
+			CString trimmed(text);
+			trimmed.Trim();
+			if (!trimmed.IsEmpty())
+			{
+				return CTextConvert::UnicodeToUTF8(text);
+			}
+		}
+		if (clip.ContainsClipFormat(CF_TEXT))
+		{
+			CString text = CTextConvert::AnsiToUnicode(clip.GetCFTextTextFormat());
+			CString trimmed(text);
+			trimmed.Trim();
+			if (!trimmed.IsEmpty())
+			{
+				return CTextConvert::UnicodeToUTF8(text);
+			}
+		}
+		return "";
+	}
+
+	bool DittoXExtractRtfBlip(const CStringA& rtf, std::vector<BYTE>& imageBytes, bool& isPngBlip, int* pictPosOut = nullptr, int* groupEndOut = nullptr)
 	{
 		imageBytes.clear();
 		isPngBlip = false;
@@ -1554,6 +1772,8 @@ namespace
 			// scan đứng sau '}' đóng của group \pict
 			int groupEnd = depth == 0 ? scan - 1 : rtf.GetLength() - 1;
 			searchFrom = groupEnd + 1;
+			if (pictPosOut) *pictPosOut = pictPos;
+			if (groupEndOut) *groupEndOut = groupEnd;
 
 			CStringA group = rtf.Mid(pictPos, groupEnd - pictPos + 1);
 			bool pngBlip = group.Find("\\pngblip") >= 0;
@@ -1729,40 +1949,46 @@ bool DittoXBuildPayloadFromClip(CClip& clip, DittoXClipPayload& payload)
 
 			std::vector<BYTE> blipBytes;
 			bool blipIsPng = false;
-			if (rtfSize > 0 && DittoXExtractRtfBlip(rtfText, blipBytes, blipIsPng))
+			int pictPos = -1, groupEnd = -1;
+			if (rtfSize > 0 && DittoXExtractRtfBlip(rtfText, blipBytes, blipIsPng, &pictPos, &groupEnd))
 			{
 				pngBytes = DittoXImageBytesToPNG(blipBytes, blipIsPng);
 				if (pngBytes.empty())
 				{
 					LogClient(L"RTF có ảnh nhúng nhưng không decode được");
 				}
+				else
+				{
+					// Thứ tự gốc của clip: text trước/sau group pict giữ nguyên vị trí
+					// quanh ảnh trong markdown. Fallback CF_UNICODETEXT chỉ dùng khi
+					// RTF không có text hai bên.
+					CStringA beforeUtf8 = DittoXRtfSpanToUtf8(rtfText, 0, pictPos);
+					CStringA afterUtf8 = DittoXRtfSpanToUtf8(rtfText, groupEnd + 1, rtfText.GetLength());
+					CStringA markdown;
+					if (!beforeUtf8.IsEmpty()) markdown += beforeUtf8 + "\n\n";
+					markdown += "![clip](img/clip-0.png)\n";
+					if (!afterUtf8.IsEmpty()) markdown += "\n" + afterUtf8 + "\n";
+					if (beforeUtf8.IsEmpty() && afterUtf8.IsEmpty())
+					{
+						// RTF thuần ảnh — dùng text từ formats nếu có (đặt trước ảnh
+						// như behavior mixed mặc định).
+						CStringA fallback = DittoXPlainTextUtf8(clip);
+						if (!fallback.IsEmpty()) markdown = fallback + "\n\n" + markdown;
+					}
+					DittoXClipAsset asset;
+					asset.canonicalPath = L"img/clip-0.png";
+					asset.contentType = "image/png";
+					asset.bytes.swap(pngBytes);
+					payload.assets.push_back(asset);
+					payload.markdownUtf8 = markdown;
+					return true;
+				}
 			}
 		}
 	}
 
-	// 2) Text: CF_UNICODETEXT ưu tiên, fallback CF_TEXT. Text whitespace-only
-	// không tính (nhưng có ảnh thì vẫn publish ảnh).
-	CStringA textUtf8;
-	if (clip.ContainsClipFormat(CF_UNICODETEXT))
-	{
-		CString text = clip.GetUnicodeTextFormat();
-		CString trimmed(text);
-		trimmed.Trim();
-		if (!trimmed.IsEmpty())
-		{
-			textUtf8 = CTextConvert::UnicodeToUTF8(text);
-		}
-	}
-	if (textUtf8.IsEmpty() && clip.ContainsClipFormat(CF_TEXT))
-	{
-		CString text = CTextConvert::AnsiToUnicode(clip.GetCFTextTextFormat());
-		CString trimmed(text);
-		trimmed.Trim();
-		if (!trimmed.IsEmpty())
-		{
-			textUtf8 = CTextConvert::UnicodeToUTF8(text);
-		}
-	}
+	// 2) Text: lấy qua DittoXPlainTextUtf8 (whitespace-only → rỗng).
+	CStringA textUtf8 = DittoXPlainTextUtf8(clip);
 
 	// 3) Compose: có ảnh lẫn text → text + tham chiếu ảnh (không mất nội dung
 	// nào); một trong hai → y như behavior cũ. Trống cả hai → không publish.
