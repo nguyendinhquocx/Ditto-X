@@ -4126,23 +4126,16 @@ bool CQPasteWnd::DoActionCloseWindow()
 		}
 		else
 		{
-			if (CGetSetOptions::GetShowPersistent() && this->GetMinimized() == false)
+			// Ditto-X: ESC luôn ẩn hết cửa sổ, kể cả khi "Luôn trên cùng" (persistent)
+			// đang bật. Persistent chỉ giữ window topmost, không được đổi nghĩa ESC;
+			// upstream roll-up thành caption strip khiến window trông như bị kẹt và
+			// vẫn chiếm màn hình. Roll-up thủ công vẫn còn qua nút » hoặc
+			// double-click caption. HideQPasteWindow tự release focus về target.
+			if (m_GroupTree.IsWindowVisible() == FALSE)
 			{
-				MinMaxWindow(FORCE_MIN);
-				theApp.m_activeWnd.ReleaseFocus();
-
-				Log(_T("close 4"));
-
+				HideQPasteWindow(true);
 				ret = true;
-			}
-			else
-			{
-				if (m_GroupTree.IsWindowVisible() == FALSE)
-				{
-					HideQPasteWindow(true);
-					ret = true;
-					Log(_T("close 5"));
-				}
+				Log(_T("close 4"));
 			}
 		}
 	}
