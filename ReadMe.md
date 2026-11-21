@@ -10,9 +10,9 @@ A personalized fork of [sabrogden/Ditto](https://github.com/sabrogden/Ditto), th
 |---|---|
 | Localization | Complete Vietnamese UI translation — 581 strings / 18 sections, set as the default language |
 | Theme | New **Minimalist** theme (flat white, black text, hairline gray row separators, light-gray selection) set as default |
-| Search | Slash type filters: `/image`, `/file`, `/text`, `/link`, `/star`, `/today` |
+| Search | Slash type filters: `/i`, `/file`, `/text`, `/l`, `/star`, `/d` + search-box hint `"/i (image) /l (link) /d (day) ctrl+z (clip) ctrl+x (path)"` |
 | Save | **Smart Ctrl+S** — saves the selected clip to a file, auto-picking the format: image → `.png`, text → `.txt`; `Ctrl+Shift+S` forces image export |
-| Quick handoff | **Ctrl+X** in the clip list — exports one selected image as `.png` or text as UTF-8 `.txt` to `%TEMP%\Ditto-X\Handoff`, then copies the absolute path without a save dialog; the path temporarily replaces the `/image /link /today` placeholder, then restores it after 1.8 seconds |
+| Quick handoff | **Ctrl+X** in the clip list — exports one selected image as `.png` or text as UTF-8 `.txt` to `%TEMP%\Ditto-X\Handoff`, then copies the absolute path without a save dialog; the path temporarily replaces the search-box hint, then restores it after 1.8 seconds |
 | Public clip link | **Ctrl+Z** in the clip list — publishes the selected clip (image, or text with embedded images) as an expiring public link on `share.quoc.app/clip/` (12 hours), copies the URL, and shows it briefly in the search box; republishing identical content reuses the live link. Requires a one-time local credential via `tools/dittox-share-credential-setup.ps1` — without it, Ctrl+Z does nothing |
 | Editor | `Ctrl+E` opens the clip editor (centered window, remembers position, caret at end of content); `Ctrl+Q` saves and closes: an edited clip re-selects in the list, a new clip is inserted with default metadata (no Properties dialog), and an empty new tab is discarded |
 | List | ~40% taller rows, hairline separators, larger image thumbnails |
@@ -26,14 +26,14 @@ A filter is recognized only as the **first token** of the search box. Anything e
 
 | Query | Result |
 |---|---|
-| `/image` | Clips containing an image format |
-| `/image logo` | Image clips matching `logo` |
+| `/i` | Clips containing an image format |
+| `/i logo` | Image clips matching `logo` |
 | `/file` | File drops (CF_HDROP) |
 | `/text` | Text clips |
-| `/link` | Clips starting with `http` |
+| `/l` | Clips starting with `http` |
 | `/star` | Starred (never auto-delete) clips |
-| `/today` | Clips copied today |
-| `/image /today` | One type filter combined with date/star |
+| `/d` | Clips copied today |
+| `/i /d` | One type filter combined with date/star |
 | `/images` | Unknown prefix → plain text search |
 | `/q name` | Upstream Quick Paste filter (unchanged) |
 

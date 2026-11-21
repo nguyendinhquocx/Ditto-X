@@ -424,7 +424,7 @@ int CQPasteWnd::OnCreate(LPCREATESTRUCT lpCreateStruct)
 
 	m_search.Create(WS_TABSTOP | WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL, CRect(0, 0, 0, 0), this, ID_EDIT_SEARCH);
 	m_search.SetDpiInfo(&m_DittoWindow.m_dpi);
-	m_search.SetPromptText(_T("/image /link /today"));
+	m_search.SetPromptText(_T("/i (image) /l (link) /d (day) ctrl+z (clip) ctrl+x (path)"));
 	::SHAutoComplete(m_search.m_hWnd, SHACF_AUTOSUGGEST_FORCE_OFF);
 	SetSearchImages();
 	m_search.LoadPastSearches(CGetSetOptions::GetPastSearchXml());
@@ -1465,7 +1465,7 @@ void CQPasteWnd::UpdateStatus(bool bRepaintImmediately)
 	SetCustomWindowTitle(windowTitle);
 }
 
-//Remove a filter token ("/star", "/today") from anywhere in the search text.
+//Remove a filter token ("/star", "/d") from anywhere in the search text.
 //Token matches as a whole word: "/star" or "/star foo", never "/stars" or "a/star".
 static bool Filter_CutTokenAnywhere(CString &csText, LPCTSTR token)
 {
@@ -1493,8 +1493,8 @@ static bool Filter_CutTokenAnywhere(CString &csText, LPCTSTR token)
 	return false;
 }
 
-//Cut a type filter prefix that must be the FIRST token ("/image" or "/image foo",
-//but not "/images"). On match csText becomes the remaining keyword text.
+//Cut a type filter prefix that must be the FIRST token ("/i" or "/i foo",
+//but not "/image"). On match csText becomes the remaining keyword text.
 static bool Filter_CutTypePrefix(CString &csText, LPCTSTR token)
 {
 	int len = (int)_tcslen(token);
@@ -1595,12 +1595,12 @@ BOOL CQPasteWnd::FillList(CString csSQLSearch)
 	}
 	else
 	{
-		//Raw input kept for m_strSearch so filter-only searches ("/image", "/today")
+		//Raw input kept for m_strSearch so filter-only searches ("/i", "/d")
 		//still count as "a search is active" for view persistence and the
 		//no-results message instead of silently degrading to an unfiltered list.
 		CString csRawSearch = csSQLSearch;
 
-		// ---- slash type filters: /image /file /text /link /star /today ----
+		// ---- slash type filters: /i /file /text /l /star /d ----
 		//These MUST be stripped before descriptionFormat.Parse below: the
 		//description parser must only see the remaining keyword text, otherwise
 		//the filter tokens leak into the text search and the filter never applies.
@@ -1608,12 +1608,12 @@ BOOL CQPasteWnd::FillList(CString csSQLSearch)
 		bool bHaveStar = false;
 		bool bHaveToday = false;
 
-		//One type filter, only as the first token ("/image", "/image logo").
+		//One type filter, only as the first token ("/i", "/i logo").
 		//Format names always come from GetFormatName (PNG is the custom Ditto
 		//image format, theApp.m_PNG_Format). EXISTS subquery instead of the
 		//INNER JOIN pattern in ClipIds.cpp - the join returns duplicate rows
 		//when a clip holds more than one matching format.
-		if (Filter_CutTypePrefix(csSQLSearch, _T("/image")))
+		if (Filter_CutTypePrefix(csSQLSearch, _T("/i")))
 		{
 			typeFilterSql.Format(_T("EXISTS(SELECT 1 FROM Data WHERE Data.lParentID = Main.lID AND ")
 				_T("Data.strClipBoardFormat IN ('%s', '%s'))"),
@@ -1631,14 +1631,14 @@ BOOL CQPasteWnd::FillList(CString csSQLSearch)
 				_T("Data.strClipBoardFormat = '%s')"),
 				GetFormatName(CF_UNICODETEXT));
 		}
-		else if (Filter_CutTypePrefix(csSQLSearch, _T("/link")))
+		else if (Filter_CutTypePrefix(csSQLSearch, _T("/l")))
 		{
 			typeFilterSql = _T("Main.mText LIKE 'http%'");
 		}
 
-		// /star and /today may appear anywhere and work standalone as well
+		// /star and /d may appear anywhere and work standalone as well
 		bHaveStar = Filter_CutTokenAnywhere(csSQLSearch, _T("/star"));
-		bHaveToday = Filter_CutTokenAnywhere(csSQLSearch, _T("/today"));
+		bHaveToday = Filter_CutTokenAnywhere(csSQLSearch, _T("/d"));
 
 		CFormatSQL descriptionFormat;
 		CString descriptionSql;
@@ -1648,7 +1648,7 @@ BOOL CQPasteWnd::FillList(CString csSQLSearch)
 		CString fullTextSql;
 
 		//If other are off then always search the description
-		//Skip when the search text is empty (e.g. it was only "/image", "/today"):
+		//Skip when the search text is empty (e.g. it was only "/i", "/d"):
 		//parsing an empty string would add a match-all LIKE and dilute the filter.
 		if (csSQLSearch != _T("") &&
 			(CGetSetOptions::GetSearchDescription() ||
@@ -1661,7 +1661,7 @@ BOOL CQPasteWnd::FillList(CString csSQLSearch)
 		}
 
 		//Exact match without the trailing space ("/q", "/f") is accepted too so
-		//a cut /star //today cannot leave a bare "/q"//f" that silently becomes
+		//a cut /star //d cannot leave a bare "/q"//f" that silently becomes
 		//a text search for "/q"//f".
 		if (csSQLSearch.Left(3) == _T("/q ") ||
 			csSQLSearch == _T("/q") ||
@@ -1719,7 +1719,7 @@ BOOL CQPasteWnd::FillList(CString csSQLSearch)
 
 		//Compose the text search conditions first, then AND on the slash filters.
 		//Every piece is only appended when present so a filter standing alone
-		//("/today", "/image") still yields a valid WHERE clause.
+		//("/d", "/i") still yields a valid WHERE clause.
 		CString textFilter;
 
 		if (descriptionSql != _T(""))
