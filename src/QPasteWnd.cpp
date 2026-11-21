@@ -424,7 +424,7 @@ int CQPasteWnd::OnCreate(LPCREATESTRUCT lpCreateStruct)
 
 	m_search.Create(WS_TABSTOP | WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL, CRect(0, 0, 0, 0), this, ID_EDIT_SEARCH);
 	m_search.SetDpiInfo(&m_DittoWindow.m_dpi);
-	m_search.SetPromptText(_T("/i (image) /l (link) /d (day) ctrl+z (clip) ctrl+x (path)"));
+	m_search.SetPromptText(_T("/i (image) /p (path) /d (day) ctrl+z (clip) ctrl+x (path)"));
 	::SHAutoComplete(m_search.m_hWnd, SHACF_AUTOSUGGEST_FORCE_OFF);
 	SetSearchImages();
 	m_search.LoadPastSearches(CGetSetOptions::GetPastSearchXml());
@@ -1600,7 +1600,7 @@ BOOL CQPasteWnd::FillList(CString csSQLSearch)
 		//no-results message instead of silently degrading to an unfiltered list.
 		CString csRawSearch = csSQLSearch;
 
-		// ---- slash type filters: /i /file /text /l /star /d ----
+		// ---- slash type filters: /i /file /text /p /star /d ----
 		//These MUST be stripped before descriptionFormat.Parse below: the
 		//description parser must only see the remaining keyword text, otherwise
 		//the filter tokens leak into the text search and the filter never applies.
@@ -1631,7 +1631,7 @@ BOOL CQPasteWnd::FillList(CString csSQLSearch)
 				_T("Data.strClipBoardFormat = '%s')"),
 				GetFormatName(CF_UNICODETEXT));
 		}
-		else if (Filter_CutTypePrefix(csSQLSearch, _T("/l")))
+		else if (Filter_CutTypePrefix(csSQLSearch, _T("/p")))
 		{
 			typeFilterSql = _T("Main.mText LIKE 'http%'");
 		}
